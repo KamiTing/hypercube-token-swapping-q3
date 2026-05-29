@@ -1,0 +1,2 @@
+samples,astar_success_rate,beam_success_rate,batcher_success_rate,avg_astar_steps,avg_beam_steps,avg_batcher_swaps,avg_astar_sec,avg_beam_sec,avg_batcher_sec,avg_astar_gap_vs_batcher,avg_beam_gap_vs_batcher
+5000,0.9516,1.0,1.0,12.720891130727196,12.9256,38.6944,0.0088784958,0.0010564575999999998,8.598000000000001e-07,-25.935266918873477,-25.7688

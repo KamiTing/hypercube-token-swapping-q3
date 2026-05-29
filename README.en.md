@@ -167,6 +167,50 @@ This generates:
 - Beam Search (14/12) matches BFS on all states (40320/40320).
 - Batcher baseline is always solvable but rarely optimal (~`1.87%`).
 
+## Q4 Random Benchmark (Branch Focus)
+
+This branch (`codex/q4-random-test`) adds a Q4 (`DIM=4`) random benchmark:
+
+- Benchmark program: `src/q4_random_benchmark.cpp`
+- Visualization script: `plot_q4_random.py`
+
+### Run Q4 benchmark
+
+```powershell
+g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
+.\q4_random_benchmark_run.exe 5000 20 32 24 42
+```
+
+Argument order:
+
+- `samples scramble_steps beam_width max_depth seed`
+
+### Generate Q4 visualizations
+
+```powershell
+.\.venv\Scripts\python.exe plot_q4_random.py
+```
+
+### Q4 output files
+
+- `output/q4_random_benchmark.csv`
+- `output/q4_random_summary.csv`
+- `output/q4_steps_hist_compare.png`
+- `output/q4_time_boxplot.png`
+- `output/q4_gap_vs_batcher_hist.png`
+
+### Latest large run (5000 samples)
+
+- `scramble_steps=20, beam_width=32, max_depth=24, seed=42`
+- `A* failures = 242/5000` (success rate `95.16%`)
+- `Beam failures = 0/5000` (success rate `100%`)
+- `Batcher failures = 0/5000`
+- `A* <= Batcher swaps = 4758/5000`
+- `Beam <= Batcher swaps = 5000/5000`
+- `avg_astar_steps = 12.7209`
+- `avg_beam_steps = 12.9256`
+- `avg_batcher_swaps = 38.6944`
+
 ## Dependencies
 
 - C++17 compiler (g++ recommended)

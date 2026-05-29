@@ -167,6 +167,50 @@ g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/ba
 - Beam（14/12）與 BFS 全部一致（40320/40320）。
 - Batcher baseline 可解但非最短路，最優率約 `1.87%`。
 
+## Q4 隨機測試（本分支重點）
+
+此分支（`codex/q4-random-test`）新增 Q4 (`DIM=4`) 的隨機 benchmark：
+
+- 程式：`src/q4_random_benchmark.cpp`
+- 可視化：`plot_q4_random.py`
+
+### 執行 Q4 benchmark
+
+```powershell
+g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
+.\q4_random_benchmark_run.exe 5000 20 32 24 42
+```
+
+參數順序：
+
+- `samples scramble_steps beam_width max_depth seed`
+
+### 產生 Q4 圖表
+
+```powershell
+.\.venv\Scripts\python.exe plot_q4_random.py
+```
+
+### Q4 輸出檔案
+
+- `output/q4_random_benchmark.csv`
+- `output/q4_random_summary.csv`
+- `output/q4_steps_hist_compare.png`
+- `output/q4_time_boxplot.png`
+- `output/q4_gap_vs_batcher_hist.png`
+
+### 最近一次大測試（5000 samples）
+
+- `scramble_steps=20, beam_width=32, max_depth=24, seed=42`
+- `A* failures = 242/5000`（success rate `95.16%`）
+- `Beam failures = 0/5000`（success rate `100%`）
+- `Batcher failures = 0/5000`
+- `A* <= Batcher swaps = 4758/5000`
+- `Beam <= Batcher swaps = 5000/5000`
+- `avg_astar_steps = 12.7209`
+- `avg_beam_steps = 12.9256`
+- `avg_batcher_swaps = 38.6944`
+
 ## 依賴
 
 - C++17 編譯器（建議 g++）

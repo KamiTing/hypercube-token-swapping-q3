@@ -17,3 +17,7 @@ add_executable(hypercube_refactor
 
 target_include_directories(hypercube_refactor PRIVATE include)
 target_link_libraries(hypercube_refactor PRIVATE OpenMP::OpenMP_CXX)
+
+add_executable(q4_random_benchmark
+    src/q4_random_benchmark.cpp
+)
