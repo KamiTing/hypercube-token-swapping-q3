@@ -210,6 +210,9 @@ g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
 - `avg_astar_steps = 12.7209`
 - `avg_beam_steps = 12.9256`
 - `avg_batcher_swaps = 38.6944`
+- `avg_astar_sec = 0.008878`
+- `avg_beam_sec = 0.001056`
+- `avg_batcher_sec = 0.00000086`
 
 ### 測試數據分析
 
@@ -225,7 +228,11 @@ g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
 4. 工程實用性：Beam 的吞吐與可用性最佳。  
 在大樣本下，Beam 同時具備「高成功率」與「低單筆耗時」，是目前 Q4 隨機測試的主要建議方法；A* 適合作為高品質解的輔助比較。
 
-5. 研究定位：Batcher 適合當 deterministic baseline。  
+5. 平均耗時分析：  
+在 `5000` 筆測試中，平均耗時為 `A* = 0.008878s`、`Beam = 0.001056s`、`Batcher = 0.00000086s`。  
+也就是 Beam 約比 A* 快 `8.4x`，而 Batcher 仍因固定網路特性最快，但不追求最短步數。
+
+6. 研究定位：Batcher 適合當 deterministic baseline。  
 Batcher 幾乎不失敗且速度極快，但不是最短路方法，主要用途是提供固定規則參考下限。
 
 ## 依賴

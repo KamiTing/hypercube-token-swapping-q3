@@ -210,6 +210,9 @@ Argument order:
 - `avg_astar_steps = 12.7209`
 - `avg_beam_steps = 12.9256`
 - `avg_batcher_swaps = 38.6944`
+- `avg_astar_sec = 0.008878`
+- `avg_beam_sec = 0.001056`
+- `avg_batcher_sec = 0.00000086`
 
 ### Result Analysis
 
@@ -225,7 +228,11 @@ Argument order:
 4. Practical takeaway: Beam is currently the best default for large random Q4 tests.  
 It combines high success rate and low per-sample runtime; A* is useful as a higher-quality comparator when it converges.
 
-5. Method positioning: Batcher is a deterministic baseline, not an optimal solver.  
+5. Average runtime analysis:  
+Over `5000` samples, average runtime is `A* = 0.008878s`, `Beam = 0.001056s`, and `Batcher = 0.00000086s`.  
+So Beam is about `8.4x` faster than A*, while Batcher remains the fastest due to fixed-network execution (not shortest-path optimization).
+
+6. Method positioning: Batcher is a deterministic baseline, not an optimal solver.  
 It is very fast and stable, but it does not target minimum swap count.
 
 ## Dependencies
