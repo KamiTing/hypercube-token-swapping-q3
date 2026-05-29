@@ -211,6 +211,23 @@ Argument order:
 - `avg_beam_steps = 12.9256`
 - `avg_batcher_swaps = 38.6944`
 
+### Result Analysis
+
+1. Robustness: Beam is the most stable.  
+`Beam failures = 0/5000`, while A* fails on `242/5000` samples under this Q4 setting.
+
+2. Solution quality: A* is slightly better when it succeeds.  
+`avg_astar_steps (12.72)` is smaller than `avg_beam_steps (12.93)`, so successful A* runs tend to produce shorter swap sequences.
+
+3. Against Batcher baseline: both search methods are much better in swap count.  
+`avg_batcher_swaps = 38.69`, whereas A*/Beam are around 13 steps on average, showing a clear improvement over fixed-network routing.
+
+4. Practical takeaway: Beam is currently the best default for large random Q4 tests.  
+It combines high success rate and low per-sample runtime; A* is useful as a higher-quality comparator when it converges.
+
+5. Method positioning: Batcher is a deterministic baseline, not an optimal solver.  
+It is very fast and stable, but it does not target minimum swap count.
+
 ## Dependencies
 
 - C++17 compiler (g++ recommended)

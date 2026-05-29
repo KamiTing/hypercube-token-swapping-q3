@@ -211,6 +211,23 @@ g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
 - `avg_beam_steps = 12.9256`
 - `avg_batcher_swaps = 38.6944`
 
+### 測試數據分析
+
+1. 穩定性：Beam 最穩定。  
+`Beam failures = 0/5000`，代表在這組 Q4 隨機測試與參數下，Beam 沒有出現搜尋失敗；A* 則有 `242/5000` 失敗。
+
+2. 路徑品質：A* 成功時步數略優於 Beam。  
+`avg_astar_steps (12.72)` 小於 `avg_beam_steps (12.93)`，表示 A* 在成功解出的樣本上通常能找到更短的交換序列。
+
+3. 與 Batcher baseline 對比：兩種搜尋法都大幅優於固定網路。  
+`avg_batcher_swaps = 38.69`，而 A*/Beam 的平均步數約 13 左右，顯示 heuristic search 對交換次數有明顯優勢。
+
+4. 工程實用性：Beam 的吞吐與可用性最佳。  
+在大樣本下，Beam 同時具備「高成功率」與「低單筆耗時」，是目前 Q4 隨機測試的主要建議方法；A* 適合作為高品質解的輔助比較。
+
+5. 研究定位：Batcher 適合當 deterministic baseline。  
+Batcher 幾乎不失敗且速度極快，但不是最短路方法，主要用途是提供固定規則參考下限。
+
 ## 依賴
 
 - C++17 編譯器（建議 g++）
