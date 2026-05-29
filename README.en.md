@@ -1,4 +1,4 @@
-# Q3 Hypercube Token Swapping
+ï»¿# Q3 Hypercube Token Swapping
 
 This project implements and validates the following problem:
 
@@ -29,6 +29,65 @@ A\* heuristic:
 
 One swap can reduce the total Hamming distance by at most 2, so this heuristic does not overestimate.
 
+## Beam Search Design Details
+
+### Core Idea
+
+A greedy search keeps only one path per step and can be trapped by local choices.  
+Beam Search keeps multiple high-potential paths at each depth: after expansion, only the top `beam_width` states are retained.
+
+Current project setting:
+
+- `BEAM_WIDTH = 14`
+- `MAX_DEPTH = 12`
+
+### Candidate State Contents
+
+Each `BeamItem` stores:
+
+- `state`: current permutation
+- `depth`: number of swaps used so far
+- `last_edge_id`: previously used edge (to avoid immediate undo)
+- `used_edges`: per-edge usage counts (for repeat-edge penalty)
+
+### Layer Expansion
+
+For each state in the current beam, all legal hypercube edge swaps are tried:
+
+`next_state = swap_nodes(state, e.u, e.v)`
+
+Q3 has 12 edges, so each state can generate up to 12 candidates per layer (before pruning).
+
+### Deduplication and Pruning
+
+`visited_best_depth[state]` stores the earliest depth at which a state was reached. If a state is revisited at an equal or greater depth, it is skipped.
+
+Also, `last_edge_id` prevents immediate reversal on the same edge.
+
+### Scoring Function (Tie-Break Order)
+
+Candidates are ranked by `BeamScore` in tuple-like ascending order (smaller is better):
+
+1. `total_dist`: total Hamming distance to target
+2. `misplaced`: number of misplaced tokens
+3. `max_dist`: max single-token distance to target
+4. `repeat_penalty`: penalty for repeated edge usage
+5. `-improvement`: global distance reduction by this swap
+6. `-local_improvement`: local improvement on swapped pair
+7. `-dir_score`: directional preference (hot correction bit)
+8. `-touched_max_dist`: prioritize touching farther tokens
+9. `depth`: prefer shallower path in full tie
+
+### Termination Conditions
+
+- Initial state is target: return `0`
+- Target found during candidate generation: return current `depth`
+- Depth reaches `MAX_DEPTH`: stop and return failure (`-1`)
+
+### Positioning
+
+Beam Search is heuristic and is not theoretically guaranteed to be optimal in general. However, on Q3 full-permutation testing (40320 states), this implementation and parameter set matches the BFS true table exactly.
+
 ## Experiment Scope
 
 - Full permutation test: `8! = 40320` states.
@@ -47,28 +106,28 @@ This configuration keeps Beam Search fully optimal on Q3 while being much faster
 
 ```text
 .
-¢u¢w¢w include/
-¢x   ¢u¢w¢w config.h
-¢x   ¢u¢w¢w hypercube.h
-¢x   ¢u¢w¢w search.h
-¢x   ¢u¢w¢w batcher.h
-¢x   ¢|¢w¢w report.h
-¢u¢w¢w src/
-¢x   ¢u¢w¢w main.cpp
-¢x   ¢u¢w¢w hypercube.cpp
-¢x   ¢u¢w¢w search.cpp
-¢x   ¢u¢w¢w batcher.cpp
-¢x   ¢|¢w¢w report.cpp
-¢u¢w¢w output/
-¢x   ¢u¢w¢w hypercube_report.txt
-¢x   ¢u¢w¢w step_distribution.csv
-¢x   ¢u¢w¢w step_distribution_summary.csv
-¢x   ¢u¢w¢w bfs_step_distribution.png
-¢x   ¢|¢w¢w method_step_distribution_compare.png
-¢u¢w¢w legacy/
-¢x   ¢|¢w¢w hypercube_test.cpp
-¢u¢w¢w plot_distribution.py
-¢|¢w¢w CMakeLists.txt
+â”œâ”€â”€ include/
+â”‚   â”œâ”€â”€ config.h
+â”‚   â”œâ”€â”€ hypercube.h
+â”‚   â”œâ”€â”€ search.h
+â”‚   â”œâ”€â”€ batcher.h
+â”‚   â””â”€â”€ report.h
+â”œâ”€â”€ src/
+â”‚   â”œâ”€â”€ main.cpp
+â”‚   â”œâ”€â”€ hypercube.cpp
+â”‚   â”œâ”€â”€ search.cpp
+â”‚   â”œâ”€â”€ batcher.cpp
+â”‚   â””â”€â”€ report.cpp
+â”œâ”€â”€ output/
+â”‚   â”œâ”€â”€ hypercube_report.txt
+â”‚   â”œâ”€â”€ step_distribution.csv
+â”‚   â”œâ”€â”€ step_distribution_summary.csv
+â”‚   â”œâ”€â”€ bfs_step_distribution.png
+â”‚   â””â”€â”€ method_step_distribution_compare.png
+â”œâ”€â”€ legacy/
+â”‚   â””â”€â”€ hypercube_test.cpp
+â”œâ”€â”€ plot_distribution.py
+â””â”€â”€ CMakeLists.txt
 ```
 
 ## Build and Run

@@ -1,121 +1,180 @@
-# Q3 Hypercube Token Swapping
+﻿# Q3 Hypercube Token Swapping
 
-�o�ӱM�׹�@�����ҥH�U���D�G
+這個專案實作並驗證以下問題：
 
 - **Minimum Token Swapping on Q3 Hypercube**
 - **Zero-buffer edge-swap routing shortest path**
 
-�b�T���W�ߤ��� `Q3`�]8 �Ӹ`�I�^�W�A�C�@�B�u��u�X�k��洫��� token�A�ؼЬO�N���N��l permutation �ର `(0,1,2,3,4,5,6,7)` �ó̤p�ƥ洫�B�ơC
+在三維超立方體 `Q3`（8 個節點）上，每一步只能沿合法邊交換兩端 token，目標是將任意初始 permutation 轉為 `(0,1,2,3,4,5,6,7)` 並最小化交換步數。
 
-## ���D�ҫ�
+## 問題模型
 
-- �`�I�G`0..7`�A���� 3-bit binary label�C
-- ��G��`�I binary �u�t 1 bit �~����C
-- ���A���ܡG`state[node] = token`�C
-- �ާ@�G�C���u�వ�@�� hypercube ��W�� swap�C
+- 節點：`0..7`，對應 3-bit binary label。
+- 邊：兩節點 binary 只差 1 bit 才有邊。
+- 狀態表示：`state[node] = token`。
+- 操作：每次只能做一條 hypercube 邊上的 swap。
 
-�o�ŦX zero-buffer routing�G�S���B�~�Ȧs�B�S�� token �|��C
+這符合 zero-buffer routing：沒有額外暫存、沒有 token 疊放。
 
-## ��k
+## 方法
 
-- **BFS**�G�u�Ȫ��]�̵u�B�� baseline�^
-- **A\***�G��T�j�M�]admissible heuristic�^
-- **Beam Search**�Gheuristic �j�M
-- **Batcher baseline**�G�T�w compare-exchange sorting-network
+- **BFS**：真值表（最短步數 baseline）
+- **A\***：精確搜尋（admissible heuristic）
+- **Beam Search**：heuristic 搜尋
+- **Batcher baseline**：固定 compare-exchange sorting-network
 
-A\* heuristic�G
+A\* heuristic：
 
 `h(state) = ceil(total_hamming_distance(state) / 2)`
 
-�]���@�� swap �̦h����� token �U�a��ؼФ@�B�A�ҥH�`�Z���̦h�U�� 2�A�G�� heuristic �������C
+因為一次 swap 最多讓兩個 token 各靠近目標一步，所以總距離最多下降 2，故此 heuristic 不高估。
 
-## ����d��
+## Beam Search 設計重點
 
-- ���ƦC���աG`8! = 40320` states�C
-- ��C�Ӫ�l���A�p���ؼЪ��A���B�ơA�ä�����P��k�C
+### 核心概念
 
-## �ثe�Ѽơ]���ˡ^
+Greedy search 每一步只保留單一路徑，容易因為局部最佳而繞路。  
+Beam Search 改為「逐層保留多條高分候選路徑」：每層展開後只留下前 `beam_width` 個狀態，兼顧效率與穩定性。
 
-�b���M�ץثe��@�U�A�g�����A���y�^���G
+本專案設定：
 
 - `BEAM_WIDTH = 14`
 - `MAX_DEPTH = 12`
 
-�o�զb Q3 �W�i�����P BFS �@�P�����u���G�A�B��e�P�]�w�]�Ҧp 100/30�^��֡C
+### 狀態與候選資訊
 
-## �M�׵��c
+每個候選節點（`BeamItem`）保存：
+
+- `state`：目前排列
+- `depth`：已使用交換步數
+- `last_edge_id`：上一條交換邊（避免立即反悔）
+- `used_edges`：每條邊已使用次數（用於重複邊懲罰）
+
+### 每層展開方式
+
+對當前 beam 內每個狀態，嘗試所有合法 hypercube 邊交換，產生下一層候選：
+
+`next_state = swap_nodes(state, e.u, e.v)`
+
+Q3 共有 12 條邊，因此每個狀態每層最多展開 12 個候選（扣除剪枝與禁忌邊）。
+
+### 去重與剪枝
+
+使用 `visited_best_depth[state]` 記錄狀態最早到達深度。若新路徑深度不更好則略過，避免重複搜尋與無效繞圈。
+
+另外，`last_edge_id` 會阻止「立刻用同一條邊反向交換」的無效動作。
+
+### 評分函數（排序優先序）
+
+候選依 `BeamScore` 做 tuple-like 比較，越小越優先，依序為：
+
+1. `total_dist`：所有 token 到目標的總 Hamming distance
+2. `misplaced`：錯位 token 數
+3. `max_dist`：最遠 token 距離
+4. `repeat_penalty`：重複使用邊的懲罰
+5. `-improvement`：本步對總距離改善量（改善越大越優）
+6. `-local_improvement`：被交換兩個 token 的局部改善量
+7. `-dir_score`：維度方向偏好（熱門修正 bit 方向優先）
+8. `-touched_max_dist`：優先處理較遠 token
+9. `depth`：平手時偏好較淺層路徑
+
+### 終止條件
+
+- 初始即目標：回傳 `0`
+- 生成候選時到達目標：回傳當前 `depth`
+- 搜尋達 `MAX_DEPTH`：停止並回傳失敗（`-1`）
+
+### 方法定位
+
+Beam Search 是 heuristic search，理論上不保證 optimal；但在本專案 Q3 全排列（40320 states）測試中，使用上述評分與參數可達成與 BFS true table 完全一致的最短步數結果。
+
+## 實驗範圍
+
+- 全排列測試：`8! = 40320` states。
+- 對每個初始狀態計算到目標狀態的步數，並比較不同方法。
+
+## 目前參數（推薦）
+
+在本專案目前實作下，經全狀態掃描回推：
+
+- `BEAM_WIDTH = 14`
+- `MAX_DEPTH = 12`
+
+這組在 Q3 上可維持與 BFS 一致的最優結果，且比寬鬆設定（例如 100/30）更快。
+
+## 專案結構
 
 ```text
 .
-�u�w�w include/
-�x   �u�w�w config.h
-�x   �u�w�w hypercube.h
-�x   �u�w�w search.h
-�x   �u�w�w batcher.h
-�x   �|�w�w report.h
-�u�w�w src/
-�x   �u�w�w main.cpp
-�x   �u�w�w hypercube.cpp
-�x   �u�w�w search.cpp
-�x   �u�w�w batcher.cpp
-�x   �|�w�w report.cpp
-�u�w�w output/
-�x   �u�w�w hypercube_report.txt
-�x   �u�w�w step_distribution.csv
-�x   �u�w�w step_distribution_summary.csv
-�x   �u�w�w bfs_step_distribution.png
-�x   �|�w�w method_step_distribution_compare.png
-�u�w�w legacy/
-�x   �|�w�w hypercube_test.cpp
-�u�w�w plot_distribution.py
-�|�w�w CMakeLists.txt
+├── include/
+│   ├── config.h
+│   ├── hypercube.h
+│   ├── search.h
+│   ├── batcher.h
+│   └── report.h
+├── src/
+│   ├── main.cpp
+│   ├── hypercube.cpp
+│   ├── search.cpp
+│   ├── batcher.cpp
+│   └── report.cpp
+├── output/
+│   ├── hypercube_report.txt
+│   ├── step_distribution.csv
+│   ├── step_distribution_summary.csv
+│   ├── bfs_step_distribution.png
+│   └── method_step_distribution_compare.png
+├── legacy/
+│   └── hypercube_test.cpp
+├── plot_distribution.py
+└── CMakeLists.txt
 ```
 
-## �ظm�P����
+## 建置與執行
 
-### 1) �sĶ C++ �D�{���]MinGW g++�^
+### 1) 編譯 C++ 主程式（MinGW g++）
 
 ```powershell
 g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/batcher.cpp src/report.cpp -Iinclude -o hypercube_refactor.exe
 ```
 
-### 2) �������
+### 2) 執行實驗
 
 ```powershell
 .\hypercube_refactor.exe
 ```
 
-��X�|�g�J `output/`�G
+輸出會寫入 `output/`：
 
 - `output/hypercube_report.txt`
 - `output/step_distribution.csv`
 
-### 3) ���Ͳέp���P��
+### 3) 產生統計表與圖
 
 ```powershell
 .\.venv\Scripts\python.exe plot_distribution.py
 ```
 
-�|���͡G
+會產生：
 
 - `output/step_distribution_summary.csv`
 - `output/bfs_step_distribution.png`
 - `output/method_step_distribution_compare.png`
 
-## �D�n���G�K�n�]Q3 �����^
+## 主要結果摘要（Q3 全測）
 
-- A\* �P BFS �����@�P�]40320/40320�^�C
-- Beam�]14/12�^�P BFS �����@�P�]40320/40320�^�C
-- Batcher baseline �i�Ѧ��D�̵u���A���u�v�� `1.87%`�C
+- A\* 與 BFS 全部一致（40320/40320）。
+- Beam（14/12）與 BFS 全部一致（40320/40320）。
+- Batcher baseline 可解但非最短路，最優率約 `1.87%`。
 
-## �̿�
+## 依賴
 
-- C++17 �sĶ���]��ĳ g++�^
+- C++17 編譯器（建議 g++）
 - OpenMP
 - Python 3.11+
-- pandas, matplotlib�]�Ω�ø�ϸ}���^
+- pandas, matplotlib（用於繪圖腳本）
 
-## �Ƶ�
+## 備註
 
-- `output/` ���������粣�X�ؿ��C
-- `legacy/` �O�d�������ɪ����ѰѦҡC
+- `output/` 為正式實驗產出目錄。
+- `legacy/` 保留早期單檔版本供參考。
