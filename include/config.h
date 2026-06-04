@@ -9,6 +9,7 @@ constexpr int MAX_STEP_BUCKET = 64;
 
 constexpr bool RUN_BFS = true;
 constexpr bool RUN_ASTAR = true;
+constexpr bool RUN_STRONG_ASTAR = true;
 constexpr bool RUN_BEAM = true;
 constexpr bool RUN_BATCHER = true;
 

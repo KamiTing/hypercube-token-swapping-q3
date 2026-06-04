@@ -28,6 +28,7 @@ df["steps"] = df["steps"].astype(int)
 expected_columns = [
     "bfs_count",
     "astar_count",
+    "strong_astar_count",
     "beam_count",
     "batcher_count"
 ]
@@ -41,6 +42,7 @@ total_states = df["bfs_count"].sum()
 
 df["bfs_ratio"] = df["bfs_count"] / total_states
 df["astar_ratio"] = df["astar_count"] / total_states
+df["strong_astar_ratio"] = df["strong_astar_count"] / total_states
 df["beam_ratio"] = df["beam_count"] / total_states
 df["batcher_ratio"] = df["batcher_count"] / total_states
 
@@ -93,32 +95,39 @@ print(f"BFS distribution figure saved to: {OUTPUT_BFS_FIG}")
 
 plt.figure(figsize=(12, 6))
 
-bar_width = 0.2
+bar_width = 0.16
 x = df["steps"]
 
 plt.bar(
-    x - 1.5 * bar_width,
+    x - 2.0 * bar_width,
     df["bfs_count"],
     width=bar_width,
     label="BFS true table"
 )
 
 plt.bar(
-    x - 0.5 * bar_width,
+    x - 1.0 * bar_width,
     df["astar_count"],
     width=bar_width,
-    label="A*"
+    label="Basic A*"
 )
 
 plt.bar(
-    x + 0.5 * bar_width,
+    x,
+    df["strong_astar_count"],
+    width=bar_width,
+    label="Strong A*"
+)
+
+plt.bar(
+    x + 1.0 * bar_width,
     df["beam_count"],
     width=bar_width,
     label="Beam Search"
 )
 
 plt.bar(
-    x + 1.5 * bar_width,
+    x + 2.0 * bar_width,
     df["batcher_count"],
     width=bar_width,
     label="Batcher's merge sort"
@@ -155,7 +164,8 @@ print("\n========================================")
 print("Average Steps")
 print("========================================")
 print(f"BFS true table     : {weighted_average_steps('bfs_count'):.6f}")
-print(f"A*                 : {weighted_average_steps('astar_count'):.6f}")
+print(f"Basic A*           : {weighted_average_steps('astar_count'):.6f}")
+print(f"Strong A*          : {weighted_average_steps('strong_astar_count'):.6f}")
 print(f"Beam Search        : {weighted_average_steps('beam_count'):.6f}")
 print(f"Batcher's baseline : {weighted_average_steps('batcher_count'):.6f}")
 
@@ -166,7 +176,8 @@ print("========================================")
 
 for col, name in [
     ("bfs_count", "BFS true table"),
-    ("astar_count", "A*"),
+    ("astar_count", "Basic A*"),
+    ("strong_astar_count", "Strong A*"),
     ("beam_count", "Beam Search"),
     ("batcher_count", "Batcher's baseline")
 ]:

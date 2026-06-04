@@ -19,15 +19,22 @@ This is a zero-buffer routing model: no extra buffers, no token stacking.
 ## Methods
 
 - **BFS**: exact shortest-path true table
-- **A\***: exact search with admissible heuristic
+- **Basic A\***: exact search using `ceil(total_hamming_distance / 2)`
+- **Strong A\***: exact search using a stronger admissible lower bound
 - **Beam Search**: heuristic search
 - **Batcher baseline**: fixed compare-exchange sorting network
 
-A\* heuristic:
+Basic A\* heuristic:
 
 `h(state) = ceil(total_hamming_distance(state) / 2)`
 
 One swap can reduce the total Hamming distance by at most 2, so this heuristic does not overestimate.
+
+Strong A\* heuristic:
+
+`h_strong = parity_adjust(max(ceil(total_hamming_distance / 2), max_packet_distance, cycle_lower_bound))`
+
+Here, `cycle_lower_bound = N - number_of_cycles`, and `parity_adjust` adjusts the lower bound to match the current permutation parity. These terms are all lower bounds, so Strong A\* remains optimal when it terminates without resource caps.
 
 ## Beam Search Design Details
 
@@ -121,6 +128,7 @@ This configuration keeps Beam Search fully optimal on Q3 while being much faster
 ├── output/
 │   ├── hypercube_report.txt
 │   ├── step_distribution.csv
+│   ├── q3_routing_paths.csv
 │   ├── step_distribution_summary.csv
 │   ├── bfs_step_distribution.png
 │   └── method_step_distribution_compare.png
@@ -148,6 +156,9 @@ Outputs will be written to `output/`:
 
 - `output/hypercube_report.txt`
 - `output/step_distribution.csv`
+- `output/q3_routing_paths.csv`
+
+`q3_routing_paths.csv` records detailed routing paths for every tested permutation. Each row includes the initial state, BFS/Basic A*/Strong A*/Beam/Batcher step counts, and the actual edge-swap sequence. For example, `01 13 37` means swapping `(0,1)`, then `(1,3)`, then `(3,7)`.
 
 ### 3) Generate summary table and plots
 
@@ -163,9 +174,12 @@ This generates:
 
 ## Key Results (Q3 Full Test)
 
-- A\* matches BFS on all states (40320/40320).
+- Basic A\* matches BFS on all states (40320/40320).
+- Strong A\* matches BFS on all states (40320/40320).
 - Beam Search (14/12) matches BFS on all states (40320/40320).
 - Batcher baseline is always solvable but rarely optimal (~`1.87%`).
+- BFS / Basic A\* / Strong A\* / Beam average shortest steps: `6.606349`.
+- Batcher baseline average swaps: `12.000000`.
 
 ## Dependencies
 

@@ -41,3 +41,42 @@ BatcherResult batcher_merge_sort_baseline(uint64_t initial_state) {
 
     return {compare_count, swap_count, round_count, is_solved(state)};
 }
+
+BatcherPathResult batcher_merge_sort_path(uint64_t initial_state) {
+    uint64_t state = initial_state;
+    BatcherPathResult result;
+
+    const int N = cfg::NODE_COUNT;
+
+    for (int k = 2; k <= N; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            result.round_count++;
+
+            for (int i = 0; i < N; ++i) {
+                int partner = i ^ j;
+                if (partner <= i) {
+                    continue;
+                }
+
+                if (!is_hypercube_edge(i, partner)) {
+                    continue;
+                }
+
+                bool ascending = ((i & k) == 0);
+                int pi = get_packet(state, i);
+                int pj = get_packet(state, partner);
+                result.compare_count++;
+
+                bool need_swap = ascending ? (pi > pj) : (pi < pj);
+                if (need_swap) {
+                    state = swap_nodes(state, i, partner);
+                    result.swaps.push_back({i, partner});
+                    result.swap_count++;
+                }
+            }
+        }
+    }
+
+    result.success = is_solved(state);
+    return result;
+}

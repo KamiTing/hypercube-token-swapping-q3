@@ -19,15 +19,22 @@
 ## 方法
 
 - **BFS**：真值表（最短步數 baseline）
-- **A\***：精確搜尋（admissible heuristic）
+- **Basic A\***：精確搜尋，使用 `ceil(total_hamming_distance / 2)`
+- **Strong A\***：精確搜尋，使用更強的 admissible lower bound
 - **Beam Search**：heuristic 搜尋
 - **Batcher baseline**：固定 compare-exchange sorting-network
 
-A\* heuristic：
+Basic A\* heuristic：
 
 `h(state) = ceil(total_hamming_distance(state) / 2)`
 
 因為一次 swap 最多讓兩個 token 各靠近目標一步，所以總距離最多下降 2，故此 heuristic 不高估。
+
+Strong A\* heuristic：
+
+`h_strong = parity_adjust(max(ceil(total_hamming_distance / 2), max_packet_distance, cycle_lower_bound))`
+
+其中 `cycle_lower_bound = N - number_of_cycles`，而 `parity_adjust` 會將 lower bound 調整到與目前 permutation parity 相同的步數奇偶性。這些項目皆為 lower bound，因此 Strong A\* 仍可保證 optimal。
 
 ## Beam Search 設計重點
 
@@ -121,6 +128,7 @@ Beam Search 是 heuristic search，理論上不保證 optimal；但在本專案 
 ├── output/
 │   ├── hypercube_report.txt
 │   ├── step_distribution.csv
+│   ├── q3_routing_paths.csv
 │   ├── step_distribution_summary.csv
 │   ├── bfs_step_distribution.png
 │   └── method_step_distribution_compare.png
@@ -148,6 +156,9 @@ g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/ba
 
 - `output/hypercube_report.txt`
 - `output/step_distribution.csv`
+- `output/q3_routing_paths.csv`
+
+`q3_routing_paths.csv` 是逐 permutation 的 detailed routing path 紀錄。每列包含初始 state、BFS/Basic A*/Strong A*/Beam/Batcher 的步數，以及實際 edge-swap sequence。例如 `01 13 37` 代表依序交換 `(0,1)`, `(1,3)`, `(3,7)`。
 
 ### 3) 產生統計表與圖
 
@@ -163,9 +174,12 @@ g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/ba
 
 ## 主要結果摘要（Q3 全測）
 
-- A\* 與 BFS 全部一致（40320/40320）。
+- Basic A\* 與 BFS 全部一致（40320/40320）。
+- Strong A\* 與 BFS 全部一致（40320/40320）。
 - Beam（14/12）與 BFS 全部一致（40320/40320）。
 - Batcher baseline 可解但非最短路，最優率約 `1.87%`。
+- BFS / Basic A\* / Strong A\* / Beam 平均最短步數為 `6.606349`。
+- Batcher baseline 平均 swap 數為 `12.000000`。
 
 ## 依賴
 
