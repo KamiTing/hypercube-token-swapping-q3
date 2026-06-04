@@ -1,0 +1,5 @@
+sample_id,total_dist,state_hex,status,astar_steps,proof_depth,match,astar_expanded,dfs_expanded,dfs_pruned_lb,dfs_pruned_cache,dfs_cache_size,astar_sec,dfs_sec,proof_time_limit_sec
+1,34,0xC18602FE9743DA5B,skipped_low_step,18,17,0,3121,0,0,0,0,0.014653,0.000000,3600.000000
+2,22,0xFEC2DB18A7493065,skipped_low_step,13,12,0,1283,0,0,0,0,0.005554,0.000000,3600.000000
+3,30,0x4C0EF1A63D857B92,skipped_low_step,18,17,0,185943,0,0,0,0,1.263380,0.000000,3600.000000
+4,40,0x723F4C6B0D1AE985,proof_time_limit,20,19,0,5852,30462902272,28993998913,486229085,201326592,0.025161,3599.999646,3600.000000

@@ -189,73 +189,61 @@ Here `cycle_lower_bound = N - number_of_cycles`, and `parity_adjust` moves the l
 
 ```powershell
 g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
-.\q4_random_benchmark_run.exe 10000 32 24 42 0 0 1 output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
+.\q4_random_benchmark_run.exe 5000 32 24 42 0
 ```
 
 Argument order:
 
-- `samples beam_width max_depth seed astar_cap parallel_methods record_paths [output_dir]`
+- `samples beam_width max_depth seed astar_cap`
 - `astar_cap = 0` means no visited-state cap for A*
-- `parallel_methods = 1` runs the four methods for each case concurrently
-- `record_paths = 1` writes detailed routing paths; use `0` for large runs if memory usage matters
-- To avoid excessive memory use on hard Q4 cases, Basic A* does not write a path; `astar_path` is left empty while `astar_steps`, expanded nodes, and runtime are still recorded. Strong A*, Beam, and Batcher write full paths.
-- `output_dir` is optional and defaults to `output`. For path-enabled runs, use a separate directory to avoid overwriting an existing large benchmark.
 
 ### Generate Q4 visualizations
 
 ```powershell
-.\.venv\Scripts\python.exe plot_q4_random.py output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
+.\.venv\Scripts\python.exe plot_q4_random.py
 ```
 
 ### Q4 output files
 
-- `output_dir/q4_random_benchmark.csv`
-- `output_dir/q4_random_routing_paths.csv`
-- `output_dir/q4_random_summary.csv`
-- `output_dir/q4_steps_hist_compare.png`
-- `output_dir/q4_time_boxplot.png`
-- `output_dir/q4_gap_vs_batcher_hist.png`
+- `output/q4_random_benchmark.csv`
+- `output/q4_random_summary.csv`
+- `output/q4_steps_hist_compare.png`
+- `output/q4_time_boxplot.png`
+- `output/q4_gap_vs_batcher_hist.png`
 
-`q4_random_routing_paths.csv` records detailed routing paths for every selected permutation. Each row includes the initial state and Basic A*/Strong A*/Beam/Batcher step counts. Basic A* leaves `astar_path` empty; Strong A*, Beam, and Batcher write the actual edge-swap sequence. Because Q4 nodes include `10..15`, the path format uses `u-v`, for example `0-1 10-14`.
+### Current large run (5000 full-random samples)
 
-### Current large run (10000 full-random samples)
-
-- Output directory: `output/q4_path_selected_10000_basic_no_path_20260604_205233`
-- `beam_width=32, max_depth=24, seed=42, astar_cap=0, parallel_methods=0, record_paths=1`
-- `elapsed = 11295s`
-- `Basic A* failures = 0/10000`
-- `Strong A* failures = 0/10000`
-- `Beam failures = 0/10000`
-- `Batcher failures = 0/10000`
-- `Basic A* and Strong A* same steps = 10000/10000`
-- `Strong A* expanded <= Basic A* = 8747/10000`
-- `Basic A* avg steps = 17.1852`
-- `Strong A* avg steps = 17.1852`
-- `Beam avg steps = 17.2270`
-- `Batcher avg swaps = 39.9200`
-- `Basic A* avg expanded = 87167.9328`
-- `Strong A* avg expanded = 4287.0348`
-- `Beam avg expanded = 48680.0116`
-- `Basic A* avg sec = 0.841673`
-- `Strong A* avg sec = 0.073471`
-- `Beam avg sec = 0.018573`
-- `Batcher avg sec = 0.000022`
-- `avg case wall sec = 1.129430`
-- Routing path verification: `astar_path` is empty for every row; Strong A*, Beam, and Batcher paths all reach the Q4 goal, and path lengths match their step/swap columns.
+- `beam_width=32, max_depth=24, seed=42, astar_cap=0`
+- `elapsed = 4729s`
+- `Basic A* failures = 0/5000`
+- `Strong A* failures = 0/5000`
+- `Beam failures = 1/5000`
+- `Batcher failures = 0/5000`
+- `Basic A* and Strong A* same steps = 5000/5000`
+- `Basic A* avg steps = 17.1638`
+- `Strong A* avg steps = 17.1638`
+- `Beam avg steps = 17.3651`
+- `Batcher avg swaps = 39.9234`
+- `Basic A* avg expanded = 88782.4556`
+- `Strong A* avg expanded = 4384.9472`
+- `Basic A* avg sec = 0.706867`
+- `Strong A* avg sec = 0.030566`
+- `Beam avg sec = 0.001365`
+- `Batcher avg sec = 0.00000097`
 
 ### Result Analysis
 
 1. Strong A* preserves the same solution length as Basic A*.
-Across 10000 full-random cases, both A* variants solved all cases and matched steps on `10000/10000` samples. Since both are admissible A* searches, this run shows that the stronger heuristic reduced cost without changing the optimal result.
+Across 5000 full-random cases, both A* variants solved all cases and matched steps on `5000/5000` samples. Since both are admissible A* searches, this run shows that the stronger heuristic reduced cost without changing the optimal result.
 
 2. The stronger heuristic greatly reduces expansion.
-Average expanded nodes dropped from `87167.9328` to `4287.0348`, about a `20.3x` expansion reduction. Average runtime dropped from `0.841673s` to `0.073471s`, about an `11.5x` improvement.
+Average expanded nodes dropped from `88782.4556` to `4384.9472`, about a `20.2x` expansion reduction. Average runtime dropped from `0.706867s` to `0.030566s`, about a `23.1x` improvement.
 
 3. Beam remains the fastest heuristic search.
-Beam averaged `0.018573s`, but it is a pruning-based heuristic and does not guarantee optimality. This run solved `10000/10000` cases; its average step count was `17.2270`, slightly above the Basic A*/Strong A* average of `17.1852`.
+Beam averaged `0.001365s`, but it is a pruning-based heuristic and does not guarantee optimality. One case out of `5000` was not solved within `max_depth=24`; among successful cases, its average step count was `17.3651`, slightly above the Basic A*/Strong A* average of `17.1638`.
 
 4. Batcher is fastest but uses many more swaps.
-Batcher is a fixed compare-exchange network, not a search algorithm. It averaged `39.9200` swaps, about `2.32x` the Strong A* average shortest-path length.
+Batcher is a fixed compare-exchange network, not a search algorithm. It averaged `39.9234` swaps, about `2.33x` the Strong A* average shortest-path length.
 
 5. Method positioning.
 Basic A* and Strong A* are A* variants with admissible heuristics; Beam is a fast heuristic baseline; Batcher is a deterministic routing baseline.
@@ -271,5 +259,5 @@ Note: the `astar_*` columns in CSV outputs correspond to Basic A*.
 
 ## Notes
 
-- `output/` keeps only the current official Q4 large-run result.
-- `legacy/` stores older and outdated data, including Q3 outputs, previous Q4 runs, failed or aborted path runs, smoke tests, verification experiments, old reports, and saved runs.
+- `output/` is the official output directory.
+- `legacy/` keeps the original single-file implementation for reference.

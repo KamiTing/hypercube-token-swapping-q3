@@ -1,0 +1,9 @@
+﻿snapshot_name=q4_full_random_5000_basic_strong_beam32_depth24_seed42_20260604_110619
+created_at=2026-06-04 11:06:19 +08:00
+source_dir=C:\Users\tingt\OneDrive\桌面\高等演算法\Final-q4
+settings=samples=5000, generator=full-random permutation, beam_width=32, max_depth=24, seed=42, astar_cap=0
+naming=astar_* columns correspond to Basic A*
+copied_files=output\q4_random_benchmark.csv, output\q4_random_summary.csv, output\q4_steps_hist_compare.png, output\q4_time_boxplot.png, output\q4_gap_vs_batcher_hist.png, output\q4_random_benchmark_5000_stdout.log, output\q4_random_benchmark_5000_stderr.log, README.md, README.en.md
+summary:
+samples,astar_success_rate,strong_astar_success_rate,beam_success_rate,batcher_success_rate,avg_astar_steps,avg_strong_astar_steps,avg_beam_steps,avg_batcher_swaps,avg_astar_sec,avg_strong_astar_sec,avg_beam_sec,avg_batcher_sec,avg_astar_expanded,avg_strong_astar_expanded,strong_astar_same_steps_rate,avg_astar_gap_vs_batcher,avg_strong_astar_gap_vs_batcher,avg_beam_gap_vs_batcher
+5000,1.0,1.0,0.9998,1.0,17.1638,17.1638,17.36507301460292,39.9234,0.7068670041999999,0.030566179399999997,0.0013652762,9.703999999999998e-07,88782.4556,4384.9472,1.0,-22.7596,-22.7596,-22.558511702340468

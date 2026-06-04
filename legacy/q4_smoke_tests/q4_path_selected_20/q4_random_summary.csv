@@ -1,0 +1,2 @@
+samples,astar_success_rate,strong_astar_success_rate,beam_success_rate,batcher_success_rate,avg_astar_steps,avg_strong_astar_steps,avg_beam_steps,avg_batcher_swaps,avg_astar_sec,avg_strong_astar_sec,avg_beam_sec,avg_batcher_sec,avg_case_wall_sec,avg_astar_expanded,avg_strong_astar_expanded,strong_astar_same_steps_rate,avg_astar_gap_vs_batcher,avg_strong_astar_gap_vs_batcher,avg_beam_gap_vs_batcher
+20,1.0,1.0,1.0,1.0,17.55,17.55,17.65,39.35,1.26752755,0.1067051,0.013187200000000001,4.6e-06,1.6510027999999999,85978.0,7295.1,1.0,-21.8,-21.8,-21.7

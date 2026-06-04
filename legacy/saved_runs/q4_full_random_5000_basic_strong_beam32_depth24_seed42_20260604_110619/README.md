@@ -189,73 +189,61 @@ Strong A* heuristic：
 
 ```powershell
 g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
-.\q4_random_benchmark_run.exe 10000 32 24 42 0 0 1 output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
+.\q4_random_benchmark_run.exe 5000 32 24 42 0
 ```
 
 參數順序：
 
-- `samples beam_width max_depth seed astar_cap parallel_methods record_paths [output_dir]`
+- `samples beam_width max_depth seed astar_cap`
 - `astar_cap = 0` 表示不限制 A* visited-state 數量
-- `parallel_methods = 1` 表示同一個 case 的四種方法用平行執行
-- `record_paths = 1` 會輸出 detailed routing paths；若大型測試要節省記憶體可設為 `0`
-- 為了避免 Q4 hard case 的記憶體爆量，Basic A* 不輸出 path；`astar_path` 會留空，只保留 `astar_steps`、expanded nodes 與時間。Strong A*、Beam、Batcher 會輸出完整 path。
-- `output_dir` 可省略；預設為 `output`。建議 path-enabled 測試指定獨立資料夾，避免覆蓋既有大型 benchmark。
 
 ### 產生 Q4 圖表
 
 ```powershell
-.\.venv\Scripts\python.exe plot_q4_random.py output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
+.\.venv\Scripts\python.exe plot_q4_random.py
 ```
 
 ### Q4 輸出檔案
 
-- `output_dir/q4_random_benchmark.csv`
-- `output_dir/q4_random_routing_paths.csv`
-- `output_dir/q4_random_summary.csv`
-- `output_dir/q4_steps_hist_compare.png`
-- `output_dir/q4_time_boxplot.png`
-- `output_dir/q4_gap_vs_batcher_hist.png`
+- `output/q4_random_benchmark.csv`
+- `output/q4_random_summary.csv`
+- `output/q4_steps_hist_compare.png`
+- `output/q4_time_boxplot.png`
+- `output/q4_gap_vs_batcher_hist.png`
 
-`q4_random_routing_paths.csv` 是逐 selected permutation 的 detailed routing path 紀錄。每列包含初始 state、Basic A*/Strong A*/Beam/Batcher 的步數；其中 Basic A* 的 `astar_path` 為空，Strong A*、Beam、Batcher 會輸出實際 edge-swap sequence。Q4 節點包含 `10..15`，因此路徑格式使用 `u-v`，例如 `0-1 10-14`。
+### 目前大型測試（5000 full-random samples）
 
-### 目前大型測試（10000 full-random samples）
-
-- 輸出資料夾：`output/q4_path_selected_10000_basic_no_path_20260604_205233`
-- `beam_width=32, max_depth=24, seed=42, astar_cap=0, parallel_methods=0, record_paths=1`
-- `elapsed = 11295s`
-- `Basic A* failures = 0/10000`
-- `Strong A* failures = 0/10000`
-- `Beam failures = 0/10000`
-- `Batcher failures = 0/10000`
-- `Basic A* and Strong A* same steps = 10000/10000`
-- `Strong A* expanded <= Basic A* = 8747/10000`
-- `Basic A* avg steps = 17.1852`
-- `Strong A* avg steps = 17.1852`
-- `Beam avg steps = 17.2270`
-- `Batcher avg swaps = 39.9200`
-- `Basic A* avg expanded = 87167.9328`
-- `Strong A* avg expanded = 4287.0348`
-- `Beam avg expanded = 48680.0116`
-- `Basic A* avg sec = 0.841673`
-- `Strong A* avg sec = 0.073471`
-- `Beam avg sec = 0.018573`
-- `Batcher avg sec = 0.000022`
-- `avg case wall sec = 1.129430`
-- Routing path 驗證：`astar_path` 全部留空；Strong A*、Beam、Batcher path 皆抵達 Q4 goal，且 path 長度與 step/swap 欄位一致。
+- `beam_width=32, max_depth=24, seed=42, astar_cap=0`
+- `elapsed = 4729s`
+- `Basic A* failures = 0/5000`
+- `Strong A* failures = 0/5000`
+- `Beam failures = 1/5000`
+- `Batcher failures = 0/5000`
+- `Basic A* and Strong A* same steps = 5000/5000`
+- `Basic A* avg steps = 17.1638`
+- `Strong A* avg steps = 17.1638`
+- `Beam avg steps = 17.3651`
+- `Batcher avg swaps = 39.9234`
+- `Basic A* avg expanded = 88782.4556`
+- `Strong A* avg expanded = 4384.9472`
+- `Basic A* avg sec = 0.706867`
+- `Strong A* avg sec = 0.030566`
+- `Beam avg sec = 0.001365`
+- `Batcher avg sec = 0.00000097`
 
 ### 測試數據分析
 
 1. Strong A* 保持與 Basic A* 相同步數。
-在 10000 筆 full-random case 中，兩者皆成功且 `10000/10000` 步數一致；因兩者都是 admissible A*，這代表目前樣本中 Strong heuristic 沒有改變 optimal 解，只降低搜尋成本。
+在 5000 筆 full-random case 中，兩者皆成功且 `5000/5000` 步數一致；因兩者都是 admissible A*，這代表目前樣本中 Strong heuristic 沒有改變 optimal 解，只降低搜尋成本。
 
 2. Strong heuristic 明顯減少展開量。
-平均 expanded nodes 從 `87167.9328` 降到 `4287.0348`，約為 `20.3x` 展開量改善；平均時間從 `0.841673s` 降到 `0.073471s`，約為 `11.5x` 改善。
+平均 expanded nodes 從 `88782.4556` 降到 `4384.9472`，約為 `20.2x` 展開量改善；平均時間從 `0.706867s` 降到 `0.030566s`，約為 `23.1x` 改善。
 
 3. Beam 仍是最快的 heuristic search。
-Beam 平均 `0.018573s`，但它是剪枝式 heuristic，不保證 optimal；本次 `10000/10000` 皆成功，平均步數 `17.2270`，略高於 Basic A*/Strong A* 的 `17.1852`。
+Beam 平均 `0.001365s`，但它是剪枝式 heuristic，不保證 optimal；本次有 `1/5000` case 未在 `max_depth=24` 內找到解，成功 case 的平均步數 `17.3651`，略高於 Basic A*/Strong A* 的 `17.1638`。
 
 4. Batcher baseline 速度最快但交換次數最多。
-Batcher 是固定 compare-exchange network，不做搜尋；平均 `39.9200` swaps，約為 Strong A* 平均最短步數的 `2.32x`。
+Batcher 是固定 compare-exchange network，不做搜尋；平均 `39.9234` swaps，約為 Strong A* 平均最短步數的 `2.33x`。
 
 5. 研究定位。
 Basic A* 與 Strong A* 都是使用 admissible heuristic 的 A* 變體；Beam 適合作為快速 heuristic baseline；Batcher 適合作為 deterministic routing baseline。
@@ -271,5 +259,5 @@ Basic A* 與 Strong A* 都是使用 admissible heuristic 的 A* 變體；Beam �
 
 ## 備註
 
-- `output/` 只保留目前正式 Q4 大型測試結果。
-- `legacy/` 保存舊版與過時資料，包含 Q3 輸出、舊 Q4 測試、失敗或中止的 path run、smoke tests、verification experiments、舊報告與 saved runs。
+- `output/` 為正式實驗產出目錄。
+- `legacy/` 保留早期單檔版本供參考。
