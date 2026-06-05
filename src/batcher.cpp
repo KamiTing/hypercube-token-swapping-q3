@@ -9,6 +9,10 @@ BatcherResult batcher_merge_sort_baseline(uint64_t initial_state) {
     int swap_count = 0;
     int round_count = 0;
 
+    if (is_solved(state)) {
+        return {compare_count, swap_count, round_count, true};
+    }
+
     const int N = cfg::NODE_COUNT;
 
     for (int k = 2; k <= N; k <<= 1) {
@@ -34,6 +38,9 @@ BatcherResult batcher_merge_sort_baseline(uint64_t initial_state) {
                 if (need_swap) {
                     state = swap_nodes(state, i, partner);
                     swap_count++;
+                    if (is_solved(state)) {
+                        return {compare_count, swap_count, round_count, true};
+                    }
                 }
             }
         }
@@ -45,6 +52,11 @@ BatcherResult batcher_merge_sort_baseline(uint64_t initial_state) {
 BatcherPathResult batcher_merge_sort_path(uint64_t initial_state) {
     uint64_t state = initial_state;
     BatcherPathResult result;
+
+    if (is_solved(state)) {
+        result.success = true;
+        return result;
+    }
 
     const int N = cfg::NODE_COUNT;
 
@@ -72,6 +84,10 @@ BatcherPathResult batcher_merge_sort_path(uint64_t initial_state) {
                     state = swap_nodes(state, i, partner);
                     result.swaps.push_back({i, partner});
                     result.swap_count++;
+                    if (is_solved(state)) {
+                        result.success = true;
+                        return result;
+                    }
                 }
             }
         }

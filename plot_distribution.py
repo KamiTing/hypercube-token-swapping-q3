@@ -130,7 +130,7 @@ plt.bar(
     x + 2.0 * bar_width,
     df["batcher_count"],
     width=bar_width,
-    label="Batcher's merge sort"
+    label="Batcher's baseline (early stop)"
 )
 
 plt.xlabel("Number of swaps / steps")

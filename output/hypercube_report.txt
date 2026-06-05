@@ -15,15 +15,15 @@ RUN_BEAM                         : 1
 RUN_BATCHER                      : 1
 Beam width                       : 14
 Max depth                        : 12
-Total elapsed wall time          : 6.329000 sec
+Total elapsed wall time          : 7.702000 sec
 
 [BFS True Table]
-Total BFS accumulated time       : 167.657012 sec
-Average BFS time per state       : 0.004158 sec
+Total BFS accumulated time       : 209.245987 sec
+Average BFS time per state       : 0.005190 sec
 Average BFS shortest steps       : 6.606349
 
 [Basic A*]
-Total Basic A* accumulated time  : 7.743006 sec
+Total Basic A* accumulated time  : 7.751010 sec
 Average Basic A* time per state  : 0.000192 sec
 Average Basic A* steps           : 6.606349
 Basic A* match BFS count         : 40320
@@ -31,16 +31,16 @@ Basic A* match BFS rate          : 100.000000%
 Basic A* mismatch count          : 0
 
 [Strong A*]
-Total Strong A* accumulated time : 5.115995 sec
-Average Strong A* time per state : 0.000127 sec
+Total Strong A* accumulated time : 4.829995 sec
+Average Strong A* time per state : 0.000120 sec
 Average Strong A* steps          : 6.606349
 Strong A* match BFS count        : 40320
 Strong A* match BFS rate         : 100.000000%
 Strong A* mismatch count         : 0
 
 [Beam Search]
-Total Beam accumulated time      : 12.652991 sec
-Average Beam time per state      : 0.000314 sec
+Total Beam accumulated time      : 12.799008 sec
+Average Beam time per state      : 0.000317 sec
 Beam success count               : 40320
 Beam success rate                : 100.000000%
 Beam failed count                : 0
@@ -50,17 +50,17 @@ Beam optimal vs BFS rate         : 100.000000%
 Beam not optimal count           : 0
 
 [Batcher's Merge Sort Baseline]
-Total Batcher accumulated time   : 0.097000 sec
-Average Batcher time per state   : 0.000002 sec
+Total Batcher accumulated time   : 0.050001 sec
+Average Batcher time per state   : 0.000001 sec
 Batcher success count            : 40320
 Batcher success rate             : 100.000000%
 Batcher failed count             : 0
-Average Batcher compares         : 24.000000
-Average Batcher swaps            : 12.000000
-Average Batcher rounds           : 6.000000
-Batcher optimal vs BFS count     : 755
-Batcher optimal vs BFS rate      : 1.872520%
-Batcher not optimal count        : 39565
+Average Batcher compares         : 23.084549
+Average Batcher swaps            : 11.999504
+Average Batcher rounds           : 5.956870
+Batcher optimal vs BFS count     : 757
+Batcher optimal vs BFS rate      : 1.877480%
+Batcher not optimal count        : 39563
 
 ========================================
 Step Distribution, BFS exact baseline
@@ -81,8 +81,8 @@ Steps = 12 | Count =      1
 
 [Step Distribution Table]
 steps,bfs_count,astar_count,strong_astar_count,beam_count,batcher_count
-0,1,1,1,1,0
-1,12,12,12,12,0
+0,1,1,1,1,1
+1,12,12,12,12,1
 2,90,90,90,90,0
 3,476,476,476,476,0
 4,1903,1903,1903,1903,4
@@ -91,8 +91,8 @@ steps,bfs_count,astar_count,strong_astar_count,beam_count,batcher_count
 7,11756,11756,11756,11756,528
 8,7347,7347,7347,7347,1404
 9,2408,2408,2408,2408,2928
-10,430,430,430,430,4880
-11,36,36,36,36,6592
+10,430,430,430,430,4879
+11,36,36,36,36,6591
 12,1,1,1,1,7280
 13,0,0,0,0,6592
 14,0,0,0,0,4880

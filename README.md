@@ -22,7 +22,7 @@
 - **Basic A\***：精確搜尋，使用 `ceil(total_hamming_distance / 2)`
 - **Strong A\***：精確搜尋，使用更強的 admissible lower bound
 - **Beam Search**：heuristic 搜尋
-- **Batcher baseline**：固定 compare-exchange sorting-network
+- **Batcher baseline**：compare-exchange sorting-network baseline，遇到 `is_solved(state)` 時提前停止
 
 Basic A\* heuristic：
 
@@ -177,9 +177,9 @@ g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/ba
 - Basic A\* 與 BFS 全部一致（40320/40320）。
 - Strong A\* 與 BFS 全部一致（40320/40320）。
 - Beam（14/12）與 BFS 全部一致（40320/40320）。
-- Batcher baseline 可解但非最短路，最優率約 `1.87%`。
+- Batcher baseline 可解但非最短路，最優率約 `1.877480%`。
 - BFS / Basic A\* / Strong A\* / Beam 平均最短步數為 `6.606349`。
-- Batcher baseline 平均 swap 數為 `12.000000`。
+- Batcher baseline 平均 swap 數為 `11.999504`。
 
 ## 依賴
 

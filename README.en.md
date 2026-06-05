@@ -22,7 +22,7 @@ This is a zero-buffer routing model: no extra buffers, no token stacking.
 - **Basic A\***: exact search using `ceil(total_hamming_distance / 2)`
 - **Strong A\***: exact search using a stronger admissible lower bound
 - **Beam Search**: heuristic search
-- **Batcher baseline**: fixed compare-exchange sorting network
+- **Batcher baseline**: compare-exchange sorting-network baseline with early stop when `is_solved(state)` is true
 
 Basic A\* heuristic:
 
@@ -177,9 +177,9 @@ This generates:
 - Basic A\* matches BFS on all states (40320/40320).
 - Strong A\* matches BFS on all states (40320/40320).
 - Beam Search (14/12) matches BFS on all states (40320/40320).
-- Batcher baseline is always solvable but rarely optimal (~`1.87%`).
+- Batcher baseline is always solvable but rarely optimal (~`1.877480%`).
 - BFS / Basic A\* / Strong A\* / Beam average shortest steps: `6.606349`.
-- Batcher baseline average swaps: `12.000000`.
+- Batcher baseline average swaps: `11.999504`.
 
 ## Dependencies
 
