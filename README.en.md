@@ -189,7 +189,7 @@ Here `cycle_lower_bound = N - number_of_cycles`, and `parity_adjust` moves the l
 
 ```powershell
 g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
-.\q4_random_benchmark_run.exe 10000 128 24 42 0 0 1 output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
+.\q4_random_benchmark_run.exe 10000 128 30 42 0 1 1 output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
 ```
 
 Argument order:
@@ -221,7 +221,7 @@ Argument order:
 ### Current large run (10000 full-random samples)
 
 - Output directory: `output/q4_path_selected_10000_basic_no_path_20260604_205233`
-- `beam_width=128, max_depth=24, seed=42, astar_cap=0, parallel_methods=0, record_paths=1`
+- `beam_width=128, max_depth=30, seed=42, astar_cap=0, parallel_methods=1, record_paths=1`
 - `elapsed = 11295s`
 - `Basic A* failures = 0/10000`
 - `Strong A* failures = 0/10000`
