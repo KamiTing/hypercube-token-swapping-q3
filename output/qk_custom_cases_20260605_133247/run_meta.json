@@ -1,0 +1,9 @@
+{
+    "pid":  20540,
+    "started_at":  "2026-06-05T13:32:47",
+    "command":  ".\\qk_special_cases.exe 4 8 256 0 4 2000000 30 output\\qk_custom_cases_20260605_133247 custom_qk_cases.csv",
+    "output_dir":  "output\\qk_custom_cases_20260605_133247",
+    "progress_csv":  "output\\qk_custom_cases_20260605_133247\\qk_case_progress.csv",
+    "result_csv":  "output\\qk_custom_cases_20260605_133247\\qk_special_cases.csv",
+    "launcher":  ".NET ProcessStartInfo UseShellExecute=true Hidden"
+}

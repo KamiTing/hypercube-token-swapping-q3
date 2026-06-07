@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 add_executable(hypercube_refactor
     src/main.cpp
@@ -36,3 +37,8 @@ add_executable(q4_astar_dfs_verify
 add_executable(q4_astar_heuristic_compare
     src/q4_astar_heuristic_compare.cpp
 )
+
+add_executable(qk_special_cases
+    src/qk_special_cases.cpp
+)
+target_link_libraries(qk_special_cases PRIVATE Threads::Threads SQLite::SQLite3)

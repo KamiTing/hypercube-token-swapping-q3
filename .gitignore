@@ -1,4 +1,8 @@
 .venv/
 .vscode/
+node_modules/
 *.exe
 *.zip
+*.sqlite3
+*.sqlite3-*
+output/qk_special_cases_routes_preview/

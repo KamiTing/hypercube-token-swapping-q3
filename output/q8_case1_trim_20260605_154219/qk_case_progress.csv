@@ -1,0 +1,2 @@
+completed_case,total_cases,dim,case_name,total_dist,strong_lb,exact_status,exact_steps,exact_sec,exact_path_valid,beam_status,beam_steps,beam_sec,beam_path_valid,batcher_success,batcher_swaps,batcher_sec,batcher_path_valid,elapsed_sec
+1,1,8,"q8_case1",1024,512,skipped,-1,0.000000,0,solved,686,207.722853,1,1,2318,0.020810,1,270.280250

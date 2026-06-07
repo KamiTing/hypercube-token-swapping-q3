@@ -1,9 +1,11 @@
-﻿# Q3 Hypercube Token Swapping
+﻿# Q3-Q9 Hypercube Token Swapping
 
-這個專案實作並驗證以下問題：
+這個專案實作並驗證 hypercube 上的 zero-buffer token swapping，範圍包含：
 
 - **Minimum Token Swapping on Q3 Hypercube**
 - **Zero-buffer edge-swap routing shortest path**
+- **Q4 full-random benchmark**
+- **Q4-Q9 special-case Beam Search**
 
 在三維超立方體 `Q3`（8 個節點）上，每一步只能沿合法邊交換兩端 token，目標是將任意初始 permutation 轉為 `(0,1,2,3,4,5,6,7)` 並最小化交換步數。
 
@@ -117,13 +119,19 @@ Beam Search 是 heuristic search，理論上不保證 optimal；但在本專案 
 │   ├── hypercube.cpp
 │   ├── search.cpp
 │   ├── batcher.cpp
-│   └── report.cpp
+│   ├── report.cpp
+│   └── qk_special_cases.cpp
 ├── output/
-│   ├── hypercube_report.txt
-│   ├── step_distribution.csv
-│   ├── step_distribution_summary.csv
-│   ├── bfs_step_distribution.png
-│   └── method_step_distribution_compare.png
+│   ├── q4_path_selected_10000_basic_no_path_20260604_205233/
+│   ├── qk_custom_cases_20260605_133247/
+│   ├── q8_case1_trim_20260605_154219/
+│   ├── q8_case2_trim_20260605_154927/
+│   ├── q9_case1_disk_bw256_20260607_113040/
+│   └── qk_special_cases_routes.xlsx
+├── tools/
+│   └── build_qk_special_cases_workbook.mjs
+├── custom_qk_cases.csv
+├── Q9_BEAM_SEARCH_EVOLUTION.md
 ├── legacy/
 │   └── hypercube_test.cpp
 ├── plot_distribution.py
@@ -167,9 +175,9 @@ g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/ba
 - Beam（14/12）與 BFS 全部一致（40320/40320）。
 - Batcher baseline 可解但非最短路，最優率約 `1.87%`。
 
-## Q4 完全隨機測試（本分支重點）
+## Q4 完全隨機測試
 
-此分支（`codex/q4-random-test`）新增 Q4 (`DIM=4`) 的 full-random benchmark。每個 case 由 Fisher-Yates shuffle 均勻抽樣自全部 `16!` token placements，不再使用從目標狀態 random walk 的 `scramble_steps`。
+Q4 (`DIM=4`) full-random benchmark 的每個 case 由 Fisher-Yates shuffle 均勻抽樣自全部 `16!` token placements，不使用從目標狀態 random walk 的 `scramble_steps`。
 
 - 程式：`src/q4_random_benchmark.cpp`
 - 可視化：`plot_q4_random.py`
@@ -262,14 +270,120 @@ Basic A* 與 Strong A* 都是使用 admissible heuristic 的 A* 變體；Beam �
 
 備註：輸出 CSV 中的 `astar_*` 欄位對應 Basic A*。
 
+## Q4-Q9 Special Cases（`codex/sp`）
+
+SP 分支加入 `src/qk_special_cases.cpp`，以同一個 runner 執行 Q4-Q9 指定 permutation。Q4 可執行 Strong A* 精確驗證；Q5 以上只跑 Beam Search 與 Batcher baseline，避免 Basic A* 的狀態空間爆炸。
+
+### Beam visited 模式
+
+程式保留三種 visited 實作，可由命令列選擇：
+
+| 模式 | 說明 |
+|---|---|
+| `exact` | 保存完整 packed state，適用 Q1-Q8 |
+| `fingerprint128` | 128-bit fingerprint 保存在 RAM |
+| `fingerprint128_disk` | 128-bit fingerprint 分批保存在 SQLite |
+
+Q9 使用 `fingerprint128_disk`。Bloom filter 只負責快速判斷「一定沒出現過」；若可能存在，仍會檢查 RAM pending set 與 SQLite primary key，因此 Bloom false positive 不會直接刪除候選。
+
+### Q9 記憶體與平行化改進
+
+- Path 使用 parent back-pointer，只在找到解時 backtracking 重建。
+- Fingerprint 可在 swap 後 O(1) 增量更新。
+- Total distance、misplaced count 與 max distance 使用增量計算。
+- 每層只替最後保留的 Beam candidates 建立完整 512-token state。
+- Visited fingerprints 分成 16 個 SQLite shards。
+- 24 workers 平行產生候選與執行分片查重。
+- Candidate array 使用固定 parent/edge index，最後依原始順序提交，保持決定性搜尋順序。
+- 程序在 Windows 使用 `BelowNormal` priority，降低對前景操作的影響。
+- 正式 Q9 run 關閉 candidate trace，只保留深度進度、磁碟進度與最終 path。
+
+完整設計與驗證紀錄請參考 [Q9_BEAM_SEARCH_EVOLUTION.md](Q9_BEAM_SEARCH_EVOLUTION.md)。
+
+### 編譯 special-case runner
+
+直接使用 MinGW g++：
+
+```powershell
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
+```
+
+或透過 CMake 建置 `qk_special_cases` target。CMake 需要 `Threads` 與 `SQLite3`。
+
+### 命令列參數
+
+```text
+qk_special_cases.exe
+  [min_dim=4] [max_dim=6] [beam_width=256] [max_depth=0]
+  [exact_max_dim=4] [astar_cap=2000000] [exact_time_sec=30]
+  [output_dir] [custom_cases_csv] [candidate_trace_mode=2]
+  [case_name_filter] [beam_visited_mode=exact] [worker_threads=24]
+  [disk_bloom_mb=1024] [disk_batch_size=1000000] [disk_shards=16]
+```
+
+`candidate_trace_mode`：
+
+- `0`：不記錄 candidates
+- `1`：只記錄 retained Beam
+- `2`：記錄所有新 candidates
+
+### 最終 Q9 case1 指令
+
+```powershell
+.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
+  output\q9_case1_disk_bw256_20260607_113040 `
+  .\custom_qk_cases.csv 0 q9_case1 `
+  fingerprint128_disk 24 1024 1000000 16
+```
+
+### Special-case 結果
+
+所有下列 Beam 與 Batcher path 均通過 hypercube edge replay 驗證：
+
+| Dimension | Case | Strong LB | Beam steps | Expanded | Beam sec | Batcher swaps |
+|---|---|---:|---:|---:|---:|---:|
+| Q5 | case1 | 40 | 42 | 738,848 | 0.592 | 124 |
+| Q5 | case2 | 40 | 44 | 765,473 | 0.698 | 108 |
+| Q6 | case1 | 96 | 106 | 4,790,899 | 6.669 | 344 |
+| Q6 | case2 | 84 | 92 | 4,200,618 | 5.561 | 318 |
+| Q7 | case1 | 224 | 254 | 27,793,523 | 50.056 | 906 |
+| Q7 | case2 | 196 | 240 | 26,463,332 | 49.953 | 808 |
+| Q8 | case1 | 512 | 686 | 88,551,994 | 207.723 | 2318 |
+| Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
+| Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
+
+Q9 case1：
+
+- Beam width：`256`
+- 解深度：`1558`
+- Visited states：`909,749,195`
+- 執行時間：約 `3 小時 58 分 28 秒`
+- Peak RAM：約 `1.56 GB`
+- 搜尋完成時 SQLite visited：約 `19.75 GB`
+- Beam 比 Batcher 少約 `73.0%` swaps
+- `beam_path_valid=1`
+
+搜尋完成後 SQLite visited shards 已刪除以釋放空間；最終 path、每層進度與結果 CSV 仍保留。
+
+### 成果檔
+
+- Q4-Q7：`output/qk_custom_cases_20260605_133247/`
+- Q8 case1：`output/q8_case1_trim_20260605_154219/`
+- Q8 case2：`output/q8_case2_trim_20260605_154927/`
+- Q9 case1：`output/q9_case1_disk_bw256_20260607_113040/`
+- 完整路徑 Excel：`output/qk_special_cases_routes.xlsx`
+- 自訂 cases：`custom_qk_cases.csv`
+
 ## 依賴
 
 - C++17 編譯器（建議 g++）
 - OpenMP
+- Threads
+- SQLite3
 - Python 3.11+
 - pandas, matplotlib（用於繪圖腳本）
 
 ## 備註
 
-- `output/` 只保留目前正式 Q4 大型測試結果。
+- `output/` 保留正式 Q4 benchmark、Q4-Q9 special-case 結果與完整路徑 Excel。
 - `legacy/` 保存舊版與過時資料，包含 Q3 輸出、舊 Q4 測試、失敗或中止的 path run、smoke tests、verification experiments、舊報告與 saved runs。
