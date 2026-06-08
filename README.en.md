@@ -113,13 +113,26 @@ This configuration keeps Beam Search fully optimal on Q3 while being much faster
 │   ├── hypercube.h
 │   ├── search.h
 │   ├── batcher.h
-│   └── report.h
+│   ├── report.h
+│   └── qk/
+│       ├── common.h
+│       ├── hypercube.h
+│       ├── search.h
+│       ├── batcher.h
+│       ├── cases.h
+│       └── io.h
 ├── src/
 │   ├── main.cpp
 │   ├── hypercube.cpp
 │   ├── search.cpp
 │   ├── batcher.cpp
 │   ├── report.cpp
+│   ├── qk_common.cpp
+│   ├── qk_hypercube.cpp
+│   ├── qk_search.cpp
+│   ├── qk_batcher.cpp
+│   ├── qk_cases.cpp
+│   ├── qk_io.cpp
 │   └── qk_special_cases.cpp
 ├── output/
 │   ├── q4_path_selected_10000_basic_no_path_20260604_205233/
@@ -272,7 +285,19 @@ Note: the `astar_*` columns in CSV outputs correspond to Basic A*.
 
 ## Q4-Q9 Special Cases (`codex/sp`)
 
-The SP branch adds `src/qk_special_cases.cpp`, a shared runner for specified Q4-Q9 permutations. Q4 can use Strong A* for exact verification. Q5 and above run only Beam Search and the Batcher baseline to avoid Basic A* state-space explosion.
+The SP branch adds a modular `qk` special-case runner for specified Q4-Q9 permutations. Q4 can use Strong A* for exact verification. Q5 and above run only Beam Search and the Batcher baseline to avoid Basic A* state-space explosion.
+
+After the refactor, the special-case runner is split into:
+
+- `qk_common`: shared state, swap, fingerprint, and packed-key types.
+- `qk_hypercube`: hypercube edges, distances, lower bounds, and path validation.
+- `qk_search`: Strong A*, Beam Search, RAM fingerprint visited storage, and SQLite disk fingerprint visited storage.
+- `qk_batcher`: Batcher baseline.
+- `qk_cases`: built-in cases, custom CSV parsing, and permutation validation.
+- `qk_io`: CSV escaping, progress display, and memory-trimming helpers.
+- `qk_special_cases.cpp`: CLI arguments, output files, and the top-level runner flow.
+
+`custom_qk_cases.csv` can hold Q10 case data for future experiments. The current runner still executes only Q1-Q9; Q10 needs later search-strategy and execution-limit changes.
 
 ### Beam visited modes
 
@@ -305,7 +330,10 @@ See [Q9_BEAM_SEARCH_EVOLUTION.md](Q9_BEAM_SEARCH_EVOLUTION.md) for the complete 
 Direct MinGW g++ build:
 
 ```powershell
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -Iinclude `
+  src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp `
+  src\qk_search.cpp src\qk_batcher.cpp src\qk_cases.cpp `
+  src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
 ```
 
 The `qk_special_cases` CMake target can also be used. CMake requires `Threads` and `SQLite3`.

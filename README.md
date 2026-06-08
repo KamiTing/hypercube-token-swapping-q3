@@ -113,13 +113,26 @@ Beam Search 是 heuristic search，理論上不保證 optimal；但在本專案 
 │   ├── hypercube.h
 │   ├── search.h
 │   ├── batcher.h
-│   └── report.h
+│   ├── report.h
+│   └── qk/
+│       ├── common.h
+│       ├── hypercube.h
+│       ├── search.h
+│       ├── batcher.h
+│       ├── cases.h
+│       └── io.h
 ├── src/
 │   ├── main.cpp
 │   ├── hypercube.cpp
 │   ├── search.cpp
 │   ├── batcher.cpp
 │   ├── report.cpp
+│   ├── qk_common.cpp
+│   ├── qk_hypercube.cpp
+│   ├── qk_search.cpp
+│   ├── qk_batcher.cpp
+│   ├── qk_cases.cpp
+│   ├── qk_io.cpp
 │   └── qk_special_cases.cpp
 ├── output/
 │   ├── q4_path_selected_10000_basic_no_path_20260604_205233/
@@ -272,7 +285,19 @@ Basic A* 與 Strong A* 都是使用 admissible heuristic 的 A* 變體；Beam �
 
 ## Q4-Q9 Special Cases（`codex/sp`）
 
-SP 分支加入 `src/qk_special_cases.cpp`，以同一個 runner 執行 Q4-Q9 指定 permutation。Q4 可執行 Strong A* 精確驗證；Q5 以上只跑 Beam Search 與 Batcher baseline，避免 Basic A* 的狀態空間爆炸。
+SP 分支加入模組化的 `qk` special-case runner，用來執行 Q4-Q9 指定 permutation。Q4 可執行 Strong A* 精確驗證；Q5 以上只跑 Beam Search 與 Batcher baseline，避免 Basic A* 的狀態空間爆炸。
+
+重構後的 special-case runner 分成：
+
+- `qk_common`：共用 state、swap、fingerprint 與 packed key。
+- `qk_hypercube`：hypercube edges、distance、lower bound 與 path validation。
+- `qk_search`：Strong A*、Beam Search、RAM fingerprint visited、SQLite disk fingerprint visited。
+- `qk_batcher`：Batcher baseline。
+- `qk_cases`：內建 case、custom CSV parsing 與 permutation validation。
+- `qk_io`：CSV escaping、progress display 與記憶體整理 helper。
+- `qk_special_cases.cpp`：CLI 參數、輸出檔案與整體 runner 流程。
+
+`custom_qk_cases.csv` 可暫存 Q10 case 資料；目前 runner 實際執行仍限制在 Q1-Q9，Q10 需要後續再調整搜尋策略與執行限制。
 
 ### Beam visited 模式
 
@@ -305,7 +330,10 @@ Q9 使用 `fingerprint128_disk`。Bloom filter 只負責快速判斷「一定沒
 直接使用 MinGW g++：
 
 ```powershell
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -Iinclude `
+  src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp `
+  src\qk_search.cpp src\qk_batcher.cpp src\qk_cases.cpp `
+  src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
 ```
 
 或透過 CMake 建置 `qk_special_cases` target。CMake 需要 `Threads` 與 `SQLite3`。
