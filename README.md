@@ -311,6 +311,21 @@ SP 分支加入模組化的 `qk` special-case runner，用來執行 Q4-Q9 指定
 
 Q9 使用 `fingerprint128_disk`。Bloom filter 只負責快速判斷「一定沒出現過」；若可能存在，仍會檢查 RAM pending set 與 SQLite primary key，因此 Bloom false positive 不會直接刪除候選。
 
+### Beam 簡化排序
+
+目前 `qk_special_cases` 保留的是 Q8/Q9 成功使用的簡化 Beam 排序。每一層候選先依下列欄位由小到大保留前 `beam_width` 個：
+
+```text
+total_dist
+max_dist
+misplaced
+depth
+edge_id
+packed_key / fingerprint / order
+```
+
+這版不再使用舊 Beam 的九欄 tie-breaker，例如 `repeat_penalty`、`improvement`、`local_improvement`、`dir_score`、`touched_max_dist`。這樣做的重點是降低 per-candidate 狀態與路徑歷史成本，讓 Q8/Q9 可以搭配 fingerprint visited、disk visited 和平行候選產生穩定執行。排序本身仍是 heuristic Beam，不保證最短路徑；正確性由最後輸出的 path replay 驗證。
+
 ### Q9 記憶體與平行化改進
 
 - Path 使用 parent back-pointer，只在找到解時 backtracking 重建。

@@ -311,6 +311,21 @@ Three visited implementations remain selectable from the command line:
 
 Q9 uses `fingerprint128_disk`. The Bloom filter is only a fast negative filter. Possible hits are still checked against the in-memory pending set and the SQLite primary key, so Bloom false positives do not directly discard candidates.
 
+### Simplified Beam ordering
+
+`qk_special_cases` currently keeps the simplified Beam ordering used by the successful Q8/Q9 runs. At each depth, candidates are retained by the following ascending keys:
+
+```text
+total_dist
+max_dist
+misplaced
+depth
+edge_id
+packed_key / fingerprint / order
+```
+
+This version no longer uses the older nine-field Beam tie-breaker, such as `repeat_penalty`, `improvement`, `local_improvement`, `dir_score`, and `touched_max_dist`. The goal is to reduce per-candidate state and path-history overhead so Q8/Q9 can run reliably with fingerprint visited storage, disk visited storage, and parallel candidate generation. The ordering is still a heuristic Beam policy and does not guarantee shortest paths; final correctness is checked by replaying the output path.
+
 ### Q9 memory and parallel improvements
 
 - Paths use parent back-pointers and are reconstructed only after a solution is found.
