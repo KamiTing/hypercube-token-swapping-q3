@@ -140,6 +140,7 @@ Beam Search 是 heuristic search，理論上不保證 optimal；但在本專案 
 │   ├── q8_case1_trim_20260605_154219/
 │   ├── q8_case2_trim_20260605_154927/
 │   ├── q9_case1_disk_bw256_20260607_113040/
+│   ├── q9_case2_disk_bw256_path_20260609_170556/
 │   └── qk_special_cases_routes.xlsx
 ├── tools/
 │   └── build_qk_special_cases_workbook.mjs
@@ -370,12 +371,17 @@ qk_special_cases.exe
 - `1`：只記錄 retained Beam
 - `2`：記錄所有新 candidates
 
-### 最終 Q9 case1 指令
+### 最終 Q9 指令
 
 ```powershell
 .\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
   output\q9_case1_disk_bw256_20260607_113040 `
   .\custom_qk_cases.csv 0 q9_case1 `
+  fingerprint128_disk 24 1024 1000000 16
+
+.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
+  output\q9_case2_disk_bw256_path_20260609_170556 `
+  .\custom_qk_cases.csv 0 q9_case2 `
   fingerprint128_disk 24 1024 1000000 16
 ```
 
@@ -394,6 +400,7 @@ qk_special_cases.exe
 | Q8 | case1 | 512 | 686 | 88,551,994 | 207.723 | 2318 |
 | Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
 | Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
+| Q9 | case2 | 1059 | 1563 | 914,621,697 | 10,559.491 | 5199 |
 
 Q9 case1：
 
@@ -408,12 +415,23 @@ Q9 case1：
 
 搜尋完成後 SQLite visited shards 已刪除以釋放空間；最終 path、每層進度與結果 CSV 仍保留。
 
+Q9 case2：
+
+- Beam width：`256`
+- 解深度：`1563`
+- Visited states：`914,621,698`
+- 執行時間：約 `2 小時 56 分 0 秒`
+- 搜尋完成時 SQLite visited：約 `21.32 GB`（約 `19.86 GiB`）
+- Beam 比 Batcher 少約 `69.9%` swaps
+- `beam_path_valid=1`
+
 ### 成果檔
 
 - Q4-Q7：`output/qk_custom_cases_20260605_133247/`
 - Q8 case1：`output/q8_case1_trim_20260605_154219/`
 - Q8 case2：`output/q8_case2_trim_20260605_154927/`
 - Q9 case1：`output/q9_case1_disk_bw256_20260607_113040/`
+- Q9 case2：`output/q9_case2_disk_bw256_path_20260609_170556/`
 - 完整路徑 Excel：`output/qk_special_cases_routes.xlsx`
 - 自訂 cases：`custom_qk_cases.csv`
 

@@ -140,6 +140,7 @@ This configuration keeps Beam Search fully optimal on Q3 while being much faster
 │   ├── q8_case1_trim_20260605_154219/
 │   ├── q8_case2_trim_20260605_154927/
 │   ├── q9_case1_disk_bw256_20260607_113040/
+│   ├── q9_case2_disk_bw256_path_20260609_170556/
 │   └── qk_special_cases_routes.xlsx
 ├── tools/
 │   └── build_qk_special_cases_workbook.mjs
@@ -370,12 +371,17 @@ qk_special_cases.exe
 - `1`: retained Beam candidates only
 - `2`: all new candidates
 
-### Final Q9 case1 command
+### Final Q9 commands
 
 ```powershell
 .\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
   output\q9_case1_disk_bw256_20260607_113040 `
   .\custom_qk_cases.csv 0 q9_case1 `
+  fingerprint128_disk 24 1024 1000000 16
+
+.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
+  output\q9_case2_disk_bw256_path_20260609_170556 `
+  .\custom_qk_cases.csv 0 q9_case2 `
   fingerprint128_disk 24 1024 1000000 16
 ```
 
@@ -394,6 +400,7 @@ Every Beam and Batcher path below passed hypercube-edge replay validation:
 | Q8 | case1 | 512 | 686 | 88,551,994 | 207.723 | 2318 |
 | Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
 | Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
+| Q9 | case2 | 1059 | 1563 | 914,621,697 | 10,559.491 | 5199 |
 
 Q9 case1:
 
@@ -408,12 +415,23 @@ Q9 case1:
 
 The SQLite visited shards were deleted after completion to reclaim disk space. The final path, per-depth progress, and result CSV remain available.
 
+Q9 case2:
+
+- Beam width: `256`
+- Solution depth: `1563`
+- Visited states: `914,621,698`
+- Runtime: about `2 hours 56 minutes 0 seconds`
+- SQLite visited size at completion: about `21.32 GB` (`19.86 GiB`)
+- Beam uses about `69.9%` fewer swaps than Batcher
+- `beam_path_valid=1`
+
 ### Artifacts
 
 - Q4-Q7: `output/qk_custom_cases_20260605_133247/`
 - Q8 case1: `output/q8_case1_trim_20260605_154219/`
 - Q8 case2: `output/q8_case2_trim_20260605_154927/`
 - Q9 case1: `output/q9_case1_disk_bw256_20260607_113040/`
+- Q9 case2: `output/q9_case2_disk_bw256_path_20260609_170556/`
 - Complete route workbook: `output/qk_special_cases_routes.xlsx`
 - Custom cases: `custom_qk_cases.csv`
 
