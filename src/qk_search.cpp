@@ -8,9 +8,12 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -427,9 +430,182 @@ struct BeamItem {
     Fingerprint128 fingerprint;
 };
 
-struct BeamPathNode {
-    int parent = -1;
-    SwapStep swap{-1, -1};
+struct BeamPathRecord {
+    int32_t parent = -1;
+    uint16_t u = 0;
+    uint16_t v = 0;
+};
+
+static_assert(sizeof(BeamPathRecord) == 8, "BeamPathRecord must stay compact");
+
+class BeamPathStore {
+public:
+    explicit BeamPathStore(bool enabled) : enabled_(enabled) {
+        if (!enabled_) {
+            return;
+        }
+
+        static atomic<unsigned long long> next_id{0};
+        unsigned long long id = next_id.fetch_add(1, memory_order_relaxed);
+        auto ticks = chrono::steady_clock::now().time_since_epoch().count();
+        path_ = filesystem::temp_directory_path() /
+                ("qk_beam_path_" + to_string(ticks) + "_" + to_string(id) + ".bin");
+
+        out_.open(path_, ios::binary | ios::trunc);
+        if (!out_) {
+            throw runtime_error("cannot create Beam path temporary file: " + path_.string());
+        }
+    }
+
+    BeamPathStore(const BeamPathStore&) = delete;
+    BeamPathStore& operator=(const BeamPathStore&) = delete;
+
+    ~BeamPathStore() {
+        close_noexcept();
+        if (!path_.empty()) {
+            error_code ec;
+            filesystem::remove(path_, ec);
+        }
+    }
+
+    int append(int parent, SwapStep step) {
+        if (!enabled_) {
+            return -1;
+        }
+        if (count_ == numeric_limits<int>::max()) {
+            throw runtime_error("Beam path temporary file exceeded int back-pointer range");
+        }
+        if (step.u < 0 || step.v < 0 ||
+            step.u > numeric_limits<uint16_t>::max() ||
+            step.v > numeric_limits<uint16_t>::max()) {
+            throw runtime_error("Beam path temporary file supports node ids up to 65535");
+        }
+        BeamPathRecord record{
+            static_cast<int32_t>(parent),
+            static_cast<uint16_t>(step.u),
+            static_cast<uint16_t>(step.v)
+        };
+        out_.write(reinterpret_cast<const char*>(&record), sizeof(record));
+        if (!out_) {
+            throw runtime_error("cannot write Beam path temporary file");
+        }
+        return count_++;
+    }
+
+    vector<SwapStep> reconstruct(int path_node) {
+        vector<SwapStep> path;
+        if (!enabled_ || path_node < 0) {
+            return path;
+        }
+
+        flush();
+        while (path_node >= 0) {
+            BeamPathRecord record = read(path_node);
+            path.push_back({
+                static_cast<int>(record.u),
+                static_cast<int>(record.v)
+            });
+            path_node = record.parent;
+        }
+        reverse(path.begin(), path.end());
+        return path;
+    }
+
+    string path_string_with_step(int parent_path_node, SwapStep step) {
+        vector<SwapStep> path = reconstruct(parent_path_node);
+        path.push_back(step);
+        return path_string(path);
+    }
+
+private:
+    void flush() {
+        if (out_.is_open()) {
+            out_.flush();
+        }
+    }
+
+    BeamPathRecord read(int path_node) {
+        if (path_node < 0 || path_node >= count_) {
+            throw runtime_error("invalid Beam path back-pointer");
+        }
+        if (!in_.is_open()) {
+            in_.open(path_, ios::binary);
+            if (!in_) {
+                throw runtime_error("cannot read Beam path temporary file: " + path_.string());
+            }
+        }
+        in_.clear();
+        in_.seekg(static_cast<streamoff>(path_node) * static_cast<streamoff>(sizeof(BeamPathRecord)));
+        BeamPathRecord record;
+        in_.read(reinterpret_cast<char*>(&record), sizeof(record));
+        if (!in_) {
+            throw runtime_error("cannot read Beam path back-pointer");
+        }
+        return record;
+    }
+
+    void close_noexcept() {
+        if (out_.is_open()) {
+            out_.close();
+        }
+        if (in_.is_open()) {
+            in_.close();
+        }
+    }
+
+    bool enabled_ = false;
+    filesystem::path path_;
+    ofstream out_;
+    ifstream in_;
+    int count_ = 0;
+};
+
+class LayerVisitedWindow {
+public:
+    explicit LayerVisitedWindow(int rounds) : max_rounds_(max(rounds, 0)) {}
+
+    bool enabled() const {
+        return max_rounds_ > 0;
+    }
+
+    bool contains(const Fingerprint128& fingerprint) const {
+        if (!enabled()) {
+            return false;
+        }
+        return counts_.find(fingerprint) != counts_.end();
+    }
+
+    void add_layer(vector<Fingerprint128> fingerprints) {
+        if (!enabled()) {
+            return;
+        }
+        for (const Fingerprint128& fingerprint : fingerprints) {
+            counts_[fingerprint]++;
+        }
+        layers_.push_back(move(fingerprints));
+        while (static_cast<int>(layers_.size()) > max_rounds_) {
+            for (const Fingerprint128& fingerprint : layers_.front()) {
+                auto it = counts_.find(fingerprint);
+                if (it == counts_.end()) {
+                    continue;
+                }
+                it->second--;
+                if (it->second <= 0) {
+                    counts_.erase(it);
+                }
+            }
+            layers_.pop_front();
+        }
+    }
+
+    size_t unique_size() const {
+        return counts_.size();
+    }
+
+private:
+    int max_rounds_ = 0;
+    deque<vector<Fingerprint128>> layers_;
+    unordered_map<Fingerprint128, int, Fingerprint128Hash> counts_;
 };
 
 struct BeamCandidate {
@@ -447,30 +623,18 @@ struct BeamCandidate {
 };
 
 vector<SwapStep> reconstruct_beam_path(
-    const vector<BeamPathNode>& path_nodes,
+    BeamPathStore& path_store,
     int path_node
 ) {
-    vector<SwapStep> path;
-    while (path_node >= 0) {
-        if (path_node >= static_cast<int>(path_nodes.size())) {
-            throw runtime_error("invalid Beam path back-pointer");
-        }
-        const BeamPathNode& node = path_nodes[path_node];
-        path.push_back(node.swap);
-        path_node = node.parent;
-    }
-    reverse(path.begin(), path.end());
-    return path;
+    return path_store.reconstruct(path_node);
 }
 
 string beam_path_string_with_step(
-    const vector<BeamPathNode>& path_nodes,
+    BeamPathStore& path_store,
     int parent_path_node,
     SwapStep step
 ) {
-    vector<SwapStep> path = reconstruct_beam_path(path_nodes, parent_path_node);
-    path.push_back(step);
-    return path_string(path);
+    return path_store.path_string_with_step(parent_path_node, step);
 }
 
 bool candidate_better(const BeamCandidate& a, const BeamCandidate& b) {
@@ -496,6 +660,94 @@ bool candidate_better(const BeamCandidate& a, const BeamCandidate& b) {
         return fingerprint_less(a.fingerprint, b.fingerprint);
     }
     return a.order < b.order;
+}
+
+uint64_t perturbation_key(const BeamCandidate& candidate, int depth) {
+    uint64_t key =
+        candidate.fingerprint.low ^
+        (candidate.fingerprint.high + 0x9E3779B97F4A7C15ULL) ^
+        (static_cast<uint64_t>(depth) * 0xBF58476D1CE4E5B9ULL) ^
+        (static_cast<uint64_t>(candidate.edge_id + 1) * 0x94D049BB133111EBULL) ^
+        static_cast<uint64_t>(candidate.order);
+    return splitmix64(key);
+}
+
+vector<BeamCandidate> select_layer_only_retained(
+    vector<BeamCandidate>& sorted_candidates,
+    int beam_width,
+    double perturbation_ratio,
+    int depth
+) {
+    int perturb_slots = 0;
+    if (perturbation_ratio > 0.0) {
+        perturb_slots = static_cast<int>(ceil(static_cast<double>(beam_width) * perturbation_ratio));
+        perturb_slots = min(max(perturb_slots, 1), beam_width);
+    }
+    int greedy_slots = beam_width - perturb_slots;
+
+    unordered_set<Fingerprint128, Fingerprint128Hash> retained_seen;
+    retained_seen.reserve(static_cast<size_t>(beam_width) * 2);
+    vector<char> chosen(sorted_candidates.size(), 0);
+    vector<BeamCandidate> retained;
+    retained.reserve(static_cast<size_t>(beam_width));
+
+    auto keep_index = [&](size_t index) -> bool {
+        if (chosen[index]) {
+            return false;
+        }
+        const Fingerprint128 fingerprint = sorted_candidates[index].fingerprint;
+        if (!retained_seen.insert(fingerprint).second) {
+            chosen[index] = 1;
+            return false;
+        }
+        chosen[index] = 1;
+        retained.push_back(move(sorted_candidates[index]));
+        return true;
+    };
+
+    for (size_t i = 0;
+         i < sorted_candidates.size() && static_cast<int>(retained.size()) < greedy_slots;
+         ++i) {
+        keep_index(i);
+    }
+
+    if (perturb_slots > 0 && static_cast<int>(retained.size()) < beam_width) {
+        struct PerturbChoice {
+            uint64_t key = 0;
+            size_t index = 0;
+        };
+        vector<PerturbChoice> choices;
+        choices.reserve(sorted_candidates.size());
+        for (size_t i = 0; i < sorted_candidates.size(); ++i) {
+            if (!chosen[i]) {
+                choices.push_back({perturbation_key(sorted_candidates[i], depth), i});
+            }
+        }
+        sort(
+            choices.begin(),
+            choices.end(),
+            [](const PerturbChoice& a, const PerturbChoice& b) {
+                if (a.key != b.key) {
+                    return a.key < b.key;
+                }
+                return a.index < b.index;
+            }
+        );
+        for (const PerturbChoice& choice : choices) {
+            if (static_cast<int>(retained.size()) >= beam_width) {
+                break;
+            }
+            keep_index(choice.index);
+        }
+    }
+
+    for (size_t i = 0;
+         i < sorted_candidates.size() && static_cast<int>(retained.size()) < beam_width;
+         ++i) {
+        keep_index(i);
+    }
+
+    return retained;
 }
 
 struct BeamWorstFirst {
@@ -555,6 +807,203 @@ void write_beam_candidate_trace(
          << csv_escape(path) << "\n";
 }
 
+struct LayerParallelResult {
+    priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst> top_candidates;
+    long long layer_candidates = 0;
+    bool solved = false;
+    BeamCandidate solved_candidate;
+    int solved_parent_path_node = -1;
+    SwapStep solved_step{-1, -1};
+};
+
+struct LayerParallelWorkerResult {
+    priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst> top_candidates;
+    long long layer_candidates = 0;
+};
+
+LayerParallelResult generate_layer_only_candidates_parallel(
+    const vector<BeamItem>& beam,
+    const vector<Edge>& es,
+    const State& goal,
+    int depth,
+    bool use_packed_tie_key,
+    int candidate_keep_limit,
+    int worker_threads,
+    long long candidate_order_base,
+    const LayerVisitedWindow& recent_visited
+) {
+    LayerParallelResult result;
+    atomic<size_t> next_parent{0};
+    atomic<bool> solved{false};
+    mutex solved_mutex;
+    mutex error_mutex;
+    exception_ptr worker_error;
+    const long long edge_count = static_cast<long long>(es.size());
+
+    auto keep_solution = [&](BeamCandidate cand, int parent_path_node, SwapStep step) {
+        lock_guard<mutex> lock(solved_mutex);
+        if (!result.solved || candidate_better(cand, result.solved_candidate)) {
+            result.solved = true;
+            result.solved_candidate = move(cand);
+            result.solved_parent_path_node = parent_path_node;
+            result.solved_step = step;
+        }
+        solved.store(true, memory_order_relaxed);
+    };
+
+    int active_threads = min<int>(
+        max(worker_threads, 1),
+        max<int>(static_cast<int>(beam.size()), 1)
+    );
+    int local_keep_limit = candidate_keep_limit;
+    if (active_threads > 1) {
+        long long split_limit =
+            (static_cast<long long>(candidate_keep_limit) + active_threads - 1) /
+            active_threads;
+        long long extra_limit = min<long long>(candidate_keep_limit, 65536);
+        local_keep_limit = static_cast<int>(min(
+            static_cast<long long>(candidate_keep_limit),
+            split_limit + extra_limit
+        ));
+    }
+    vector<LayerParallelWorkerResult> worker_results(active_threads);
+
+    auto keep_candidate_local = [&](LayerParallelWorkerResult& local, BeamCandidate cand) {
+        if (
+            static_cast<int>(local.top_candidates.size()) >= local_keep_limit &&
+            !candidate_better(cand, local.top_candidates.top())
+        ) {
+            return;
+        }
+        if (static_cast<int>(local.top_candidates.size()) >= local_keep_limit) {
+            local.top_candidates.pop();
+        }
+        local.top_candidates.push(move(cand));
+    };
+
+    auto worker = [&](int worker_index) {
+        LayerParallelWorkerResult& local = worker_results[worker_index];
+        try {
+            while (!solved.load(memory_order_relaxed)) {
+                size_t parent_index = next_parent.fetch_add(1, memory_order_relaxed);
+                if (parent_index >= beam.size()) {
+                    break;
+                }
+
+                const BeamItem& item = beam[parent_index];
+                for (int eid = 0; eid < static_cast<int>(es.size()); ++eid) {
+                    if (solved.load(memory_order_relaxed)) {
+                        break;
+                    }
+                    if (eid == item.last_edge) {
+                        continue;
+                    }
+
+                    const Edge& edge = es[eid];
+                    int token_u = item.state[edge.u];
+                    int token_v = item.state[edge.v];
+                    State state = item.state;
+                    swap(state[edge.u], state[edge.v]);
+
+                    Fingerprint128 fingerprint = fingerprint_after_swap(
+                        item.fingerprint,
+                        edge.u,
+                        edge.v,
+                        token_u,
+                        token_v
+                    );
+                    PackedStateKey packed_key;
+                    if (use_packed_tie_key) {
+                        packed_key = packed_key_from_state(state);
+                    }
+                    if (recent_visited.contains(fingerprint)) {
+                        continue;
+                    }
+
+                    local.layer_candidates++;
+                    long long order =
+                        candidate_order_base +
+                        static_cast<long long>(parent_index) * edge_count +
+                        static_cast<long long>(eid) +
+                        1;
+
+                    if (state == goal) {
+                        keep_solution(
+                            BeamCandidate{
+                                0,
+                                0,
+                                0,
+                                depth,
+                                {},
+                                eid,
+                                item.path_node,
+                                move(packed_key),
+                                fingerprint,
+                                use_packed_tie_key,
+                                order
+                            },
+                            item.path_node,
+                            {edge.u, edge.v}
+                        );
+                        break;
+                    }
+
+                    keep_candidate_local(local, BeamCandidate{
+                        total_distance(state),
+                        misplaced_count(state),
+                        max_packet_distance(state),
+                        depth,
+                        move(state),
+                        eid,
+                        item.path_node,
+                        move(packed_key),
+                        fingerprint,
+                        use_packed_tie_key,
+                        order
+                    });
+                }
+            }
+        } catch (...) {
+            lock_guard<mutex> lock(error_mutex);
+            if (worker_error == nullptr) {
+                worker_error = current_exception();
+            }
+            solved.store(true, memory_order_relaxed);
+        }
+    };
+
+    vector<thread> workers;
+    workers.reserve(active_threads);
+    for (int i = 0; i < active_threads; ++i) {
+        workers.emplace_back(worker, i);
+    }
+    for (thread& worker_thread : workers) {
+        worker_thread.join();
+    }
+    if (worker_error != nullptr) {
+        rethrow_exception(worker_error);
+    }
+
+    for (LayerParallelWorkerResult& local : worker_results) {
+        result.layer_candidates += local.layer_candidates;
+        while (!local.top_candidates.empty()) {
+            BeamCandidate cand = move(const_cast<BeamCandidate&>(local.top_candidates.top()));
+            local.top_candidates.pop();
+            if (
+                static_cast<int>(result.top_candidates.size()) >= candidate_keep_limit &&
+                !candidate_better(cand, result.top_candidates.top())
+            ) {
+                continue;
+            }
+            if (static_cast<int>(result.top_candidates.size()) >= candidate_keep_limit) {
+                result.top_candidates.pop();
+            }
+            result.top_candidates.push(move(cand));
+        }
+    }
+    return result;
+}
+
 PathResult beam_search(
     const State& init,
     const vector<Edge>& es,
@@ -565,7 +1014,12 @@ PathResult beam_search(
     ofstream* depth_progress_csv = nullptr,
     ofstream* candidate_trace_csv = nullptr,
     CandidateTraceMode trace_mode = CandidateTraceMode::None,
-    BeamVisitedMode visited_mode = BeamVisitedMode::ExactPacked
+    BeamVisitedMode visited_mode = BeamVisitedMode::ExactPacked,
+    int worker_threads,
+    int layer_pool_width,
+    int layer_visited_window,
+    int layer_plateau_limit,
+    double layer_perturbation_ratio
 ) {
     auto t0 = Clock::now();
     int n = static_cast<int>(init.size());
@@ -578,22 +1032,21 @@ PathResult beam_search(
         return {0, 0, 1, 0.0, "solved", {}};
     }
     if (visited_mode == BeamVisitedMode::ExactPacked && n > 256) {
-        throw runtime_error("exact packed Beam visited supports up to Q8; use fingerprint128 for Q9");
+        throw runtime_error("exact packed Beam visited supports up to Q8; use fingerprint128 or layer_only for larger cases");
     }
 
+    bool layer_only_visited = visited_mode == BeamVisitedMode::LayerOnly;
     bool use_packed_tie_key = n <= 256;
-    Fingerprint128 initial_fingerprint;
-    if (visited_mode == BeamVisitedMode::Fingerprint128) {
-        initial_fingerprint = fingerprint_from_state(init);
-    }
+    Fingerprint128 initial_fingerprint = fingerprint_from_state(init);
 
     vector<BeamItem> beam = {{init, -1, -1, initial_fingerprint}};
-    vector<BeamPathNode> path_nodes;
     bool keep_backpointers = record_path || trace_mode != CandidateTraceMode::None;
-    if (keep_backpointers) {
-        size_t path_node_reserve = static_cast<size_t>(max(beam_width, 1)) *
-                                   static_cast<size_t>(max(max_depth, 1));
-        path_nodes.reserve(path_node_reserve);
+    BeamPathStore path_store(keep_backpointers);
+    LayerVisitedWindow recent_visited(layer_only_visited ? layer_visited_window : 0);
+    if (layer_only_visited) {
+        vector<Fingerprint128> initial_layer;
+        initial_layer.push_back(initial_fingerprint);
+        recent_visited.add_layer(move(initial_layer));
     }
     unordered_set<PackedStateKey, PackedStateKeyHash> exact_seen;
     unordered_set<Fingerprint128, Fingerprint128Hash> fingerprint_seen;
@@ -603,25 +1056,99 @@ PathResult beam_search(
     if (visited_mode == BeamVisitedMode::ExactPacked) {
         exact_seen.reserve(reserve_hint);
         exact_seen.insert(packed_key_from_state(init));
-    } else {
+    } else if (!layer_only_visited) {
         fingerprint_seen.reserve(reserve_hint);
         fingerprint_seen.insert(initial_fingerprint);
     }
 
+    long long expanded = 0;
+    int best_seen_total_dist = numeric_limits<int>::max();
+    int plateau_depths = 0;
     auto reached_state_count = [&]() -> size_t {
-        return visited_mode == BeamVisitedMode::ExactPacked
-            ? exact_seen.size()
-            : fingerprint_seen.size();
+        if (visited_mode == BeamVisitedMode::ExactPacked) {
+            return exact_seen.size();
+        }
+        if (layer_only_visited) {
+            return static_cast<size_t>(expanded + 1);
+        }
+        return fingerprint_seen.size();
     };
 
-    long long expanded = 0;
     long long candidate_order = 0;
     for (int depth = 1; depth <= max_depth; ++depth) {
         print_progress_line(progress, "beam_depth", depth, max_depth, expanded);
 
         priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst> top_candidates;
+        int candidate_keep_limit = beam_width;
+        if (layer_only_visited) {
+            long long widened_limit =
+                layer_pool_width > 0
+                    ? static_cast<long long>(layer_pool_width)
+                    : min(
+                          static_cast<long long>(beam_width) * 4,
+                          static_cast<long long>(beam_width) + 4096
+                      );
+            candidate_keep_limit = static_cast<int>(max(static_cast<long long>(beam_width), widened_limit));
+        }
         long long layer_candidates = 0;
+        bool use_parallel_layer =
+            layer_only_visited &&
+            trace_mode == CandidateTraceMode::None &&
+            worker_threads > 1 &&
+            beam.size() > 1;
 
+        if (use_parallel_layer) {
+            long long layer_order_span =
+                static_cast<long long>(beam.size()) *
+                static_cast<long long>(es.size());
+            LayerParallelResult parallel = generate_layer_only_candidates_parallel(
+                beam,
+                es,
+                goal,
+                depth,
+                use_packed_tie_key,
+                candidate_keep_limit,
+                worker_threads,
+                candidate_order,
+                recent_visited
+            );
+            top_candidates = move(parallel.top_candidates);
+            layer_candidates = parallel.layer_candidates;
+            expanded += layer_candidates;
+            candidate_order += layer_order_span;
+
+            if (parallel.solved) {
+                auto t1 = Clock::now();
+                vector<BeamCandidate> solved_selected = {parallel.solved_candidate};
+                double elapsed = chrono::duration<double>(t1 - t0).count();
+                size_t reached_count = reached_state_count();
+                write_beam_depth_progress(
+                    depth_progress_csv,
+                    progress,
+                    depth,
+                    max_depth,
+                    expanded,
+                    layer_candidates,
+                    1,
+                    solved_selected,
+                    elapsed
+                );
+
+                int solved_parent_path_node = parallel.solved_parent_path_node;
+                SwapStep solved_step = parallel.solved_step;
+                priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst>().swap(top_candidates);
+                vector<BeamItem>().swap(beam);
+                unordered_set<PackedStateKey, PackedStateKeyHash>().swap(exact_seen);
+                unordered_set<Fingerprint128, Fingerprint128Hash>().swap(fingerprint_seen);
+
+                vector<SwapStep> next_path;
+                if (record_path) {
+                    next_path = reconstruct_beam_path(path_store, solved_parent_path_node);
+                    next_path.push_back(solved_step);
+                }
+                return {depth, expanded, reached_count, elapsed, "solved", next_path};
+            }
+        } else {
         for (const auto& item : beam) {
             for (int eid = 0; eid < static_cast<int>(es.size()); ++eid) {
                 if (eid == item.last_edge) {
@@ -648,9 +1175,12 @@ PathResult beam_search(
                         token_u,
                         token_v
                     );
-                    inserted = fingerprint_seen.insert(fingerprint).second;
+                    inserted = layer_only_visited ? true : fingerprint_seen.insert(fingerprint).second;
                     if (use_packed_tie_key) {
                         packed_key = packed_key_from_state(ns);
+                    }
+                    if (layer_only_visited && recent_visited.contains(fingerprint)) {
+                        inserted = false;
                     }
                 }
                 if (!inserted) {
@@ -663,11 +1193,8 @@ PathResult beam_search(
 
                 if (ns == goal) {
                     auto t1 = Clock::now();
-                    vector<SwapStep> next_path;
-                    if (record_path) {
-                        next_path = reconstruct_beam_path(path_nodes, item.path_node);
-                        next_path.push_back({e.u, e.v});
-                    }
+                    int solved_parent_path_node = item.path_node;
+                    SwapStep solved_step{e.u, e.v};
                     vector<BeamCandidate> solved_selected = {{
                         0,
                         0,
@@ -690,11 +1217,12 @@ PathResult beam_search(
                             candidate_order,
                             solved_selected.front(),
                             goal,
-                            beam_path_string_with_step(path_nodes, item.path_node, {e.u, e.v})
+                            beam_path_string_with_step(path_store, solved_parent_path_node, solved_step)
                         );
                         candidate_trace_csv->flush();
                     }
                     double elapsed = chrono::duration<double>(t1 - t0).count();
+                    size_t reached_count = reached_state_count();
                     write_beam_depth_progress(
                         depth_progress_csv,
                         progress,
@@ -706,7 +1234,18 @@ PathResult beam_search(
                         solved_selected,
                         elapsed
                     );
-                    return {depth, expanded, reached_state_count(), elapsed, "solved", next_path};
+
+                    priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst>().swap(top_candidates);
+                    vector<BeamItem>().swap(beam);
+                    unordered_set<PackedStateKey, PackedStateKeyHash>().swap(exact_seen);
+                    unordered_set<Fingerprint128, Fingerprint128Hash>().swap(fingerprint_seen);
+
+                    vector<SwapStep> next_path;
+                    if (record_path) {
+                        next_path = reconstruct_beam_path(path_store, solved_parent_path_node);
+                        next_path.push_back(solved_step);
+                    }
+                    return {depth, expanded, reached_count, elapsed, "solved", next_path};
                 }
 
                 BeamCandidate cand{
@@ -732,23 +1271,24 @@ PathResult beam_search(
                         candidate_order,
                         cand,
                         cand.state,
-                        beam_path_string_with_step(path_nodes, item.path_node, {e.u, e.v})
+                        beam_path_string_with_step(path_store, item.path_node, {e.u, e.v})
                     );
                     if ((candidate_order % 10000) == 0) {
                         candidate_trace_csv->flush();
                     }
                 }
 
-                if (static_cast<int>(top_candidates.size()) >= beam_width && !candidate_better(cand, top_candidates.top())) {
+                if (static_cast<int>(top_candidates.size()) >= candidate_keep_limit && !candidate_better(cand, top_candidates.top())) {
                     continue;
                 }
 
-                if (static_cast<int>(top_candidates.size()) >= beam_width) {
+                if (static_cast<int>(top_candidates.size()) >= candidate_keep_limit) {
                     top_candidates.pop();
                 }
 
                 top_candidates.push(move(cand));
             }
+        }
         }
 
         if (top_candidates.empty()) {
@@ -774,16 +1314,35 @@ PathResult beam_search(
         }
 
         sort(selected.begin(), selected.end(), candidate_better);
+        if (layer_only_visited) {
+            selected = select_layer_only_retained(
+                selected,
+                beam_width,
+                layer_perturbation_ratio,
+                depth
+            );
+        }
+
+        bool plateau_reached = false;
+        if (layer_only_visited && layer_plateau_limit > 0 && !selected.empty()) {
+            int current_best_total_dist = selected.front().total_dist;
+            if (current_best_total_dist < best_seen_total_dist) {
+                best_seen_total_dist = current_best_total_dist;
+                plateau_depths = 0;
+            } else {
+                plateau_depths++;
+                plateau_reached = plateau_depths >= layer_plateau_limit;
+            }
+        }
 
         vector<int> selected_path_nodes(selected.size(), -1);
         if (keep_backpointers) {
             for (size_t i = 0; i < selected.size(); ++i) {
                 const Edge& edge = es[selected[i].edge_id];
-                path_nodes.push_back({
+                selected_path_nodes[i] = path_store.append(
                     selected[i].parent_path_node,
                     {edge.u, edge.v}
-                });
-                selected_path_nodes[i] = static_cast<int>(path_nodes.size() - 1);
+                );
             }
         }
 
@@ -797,7 +1356,7 @@ PathResult beam_search(
                     static_cast<long long>(i + 1),
                     selected[i],
                     selected[i].state,
-                    path_string(reconstruct_beam_path(path_nodes, selected_path_nodes[i]))
+                    path_string(reconstruct_beam_path(path_store, selected_path_nodes[i]))
                 );
             }
             candidate_trace_csv->flush();
@@ -814,6 +1373,27 @@ PathResult beam_search(
             selected,
             chrono::duration<double>(Clock::now() - t0).count()
         );
+
+        if (plateau_reached) {
+            size_t reached_count = reached_state_count();
+            double elapsed = chrono::duration<double>(Clock::now() - t0).count();
+            priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst>().swap(top_candidates);
+            vector<BeamCandidate>().swap(selected);
+            vector<int>().swap(selected_path_nodes);
+            vector<BeamItem>().swap(beam);
+            unordered_set<PackedStateKey, PackedStateKeyHash>().swap(exact_seen);
+            unordered_set<Fingerprint128, Fingerprint128Hash>().swap(fingerprint_seen);
+            return {-1, expanded, reached_count, elapsed, "plateau", {}};
+        }
+
+        if (layer_only_visited) {
+            vector<Fingerprint128> retained_fingerprints;
+            retained_fingerprints.reserve(selected.size());
+            for (const BeamCandidate& candidate : selected) {
+                retained_fingerprints.push_back(candidate.fingerprint);
+            }
+            recent_visited.add_layer(move(retained_fingerprints));
+        }
 
         int keep = static_cast<int>(selected.size());
         beam.clear();
@@ -1029,6 +1609,11 @@ public:
             total += shard->disk_bytes();
         }
         return total;
+    }
+
+    void release(int worker_threads) {
+        flush(worker_threads);
+        shards_.clear();
     }
 
 private:
@@ -1289,13 +1874,8 @@ PathResult beam_search_disk(
     initial_item.distance_hist = distance_histogram(init);
     vector<DiskBeamItem> beam = {move(initial_item)};
 
-    vector<BeamPathNode> path_nodes;
     bool keep_backpointers = record_path || trace_mode != CandidateTraceMode::None;
-    if (keep_backpointers) {
-        size_t path_node_reserve = static_cast<size_t>(max(beam_width, 1)) *
-                                   static_cast<size_t>(max(max_depth, 1));
-        path_nodes.reserve(path_node_reserve);
-    }
+    BeamPathStore path_store(keep_backpointers);
 
     vector<DiskGeneratedCandidate> generated;
     vector<uint8_t> is_new;
@@ -1371,11 +1951,8 @@ PathResult beam_search_disk(
                 if (candidate.total_dist == 0) {
                     const DiskBeamItem& parent = beam[candidate.parent_index];
                     const Edge& edge = es[candidate.edge_id];
-                    vector<SwapStep> next_path;
-                    if (record_path) {
-                        next_path = reconstruct_beam_path(path_nodes, parent.path_node);
-                        next_path.push_back({edge.u, edge.v});
-                    }
+                    int solved_parent_path_node = parent.path_node;
+                    SwapStep solved_step{edge.u, edge.v};
 
                     BeamCandidate solved = materialize_disk_candidate(candidate, beam, es);
                     vector<BeamCandidate> solved_selected = {move(solved)};
@@ -1389,15 +1966,18 @@ PathResult beam_search_disk(
                             solved_selected.front(),
                             goal,
                             beam_path_string_with_step(
-                                path_nodes,
-                                parent.path_node,
-                                {edge.u, edge.v}
+                                path_store,
+                                solved_parent_path_node,
+                                solved_step
                             )
                         );
                         candidate_trace_csv->flush();
                     }
 
                     visited.flush(worker_threads);
+                    size_t visited_size = visited.size();
+                    size_t pending_size = visited.pending_size();
+                    uintmax_t disk_bytes = visited.disk_bytes();
                     double elapsed = chrono::duration<double>(Clock::now() - t0).count();
                     write_beam_depth_progress(
                         depth_progress_csv,
@@ -1414,18 +1994,31 @@ PathResult beam_search_disk(
                         disk_progress_csv,
                         progress,
                         depth,
-                        visited.size(),
-                        visited.pending_size(),
-                        visited.disk_bytes(),
+                        visited_size,
+                        pending_size,
+                        disk_bytes,
                         worker_threads,
                         chrono::duration<double>(generation_end - generation_start).count(),
                         chrono::duration<double>(visited_end - visited_start).count(),
                         chrono::duration<double>(Clock::now() - selection_start).count()
                     );
+
+                    priority_queue<DiskBeamCandidate, vector<DiskBeamCandidate>, DiskBeamWorstFirst>().swap(top_candidates);
+                    vector<DiskBeamItem>().swap(beam);
+                    vector<DiskGeneratedCandidate>().swap(generated);
+                    vector<uint8_t>().swap(is_new);
+                    vector<BeamCandidate>().swap(solved_selected);
+                    visited.release(worker_threads);
+
+                    vector<SwapStep> next_path;
+                    if (record_path) {
+                        next_path = reconstruct_beam_path(path_store, solved_parent_path_node);
+                        next_path.push_back(solved_step);
+                    }
                     return {
                         depth,
                         expanded,
-                        visited.size(),
+                        visited_size,
                         elapsed,
                         "solved",
                         next_path
@@ -1445,7 +2038,7 @@ PathResult beam_search_disk(
                         materialized,
                         materialized.state,
                         beam_path_string_with_step(
-                            path_nodes,
+                            path_store,
                             parent.path_node,
                             {edge.u, edge.v}
                         )
@@ -1502,11 +2095,10 @@ PathResult beam_search_disk(
         if (keep_backpointers) {
             for (size_t i = 0; i < selected.size(); ++i) {
                 const Edge& edge = es[selected[i].edge_id];
-                path_nodes.push_back({
+                selected_path_nodes[i] = path_store.append(
                     selected[i].parent_path_node,
                     {edge.u, edge.v}
-                });
-                selected_path_nodes[i] = static_cast<int>(path_nodes.size() - 1);
+                );
             }
         }
 
@@ -1520,7 +2112,7 @@ PathResult beam_search_disk(
                     static_cast<long long>(i + 1),
                     selected[i],
                     selected[i].state,
-                    path_string(reconstruct_beam_path(path_nodes, selected_path_nodes[i]))
+                    path_string(reconstruct_beam_path(path_store, selected_path_nodes[i]))
                 );
             }
             candidate_trace_csv->flush();
@@ -1586,6 +2178,8 @@ string beam_visited_mode_name(BeamVisitedMode mode) {
             return "fingerprint128";
         case BeamVisitedMode::Fingerprint128Disk:
             return "fingerprint128_disk";
+        case BeamVisitedMode::LayerOnly:
+            return "layer_only";
     }
     return "unknown";
 }
@@ -1608,8 +2202,18 @@ BeamVisitedMode parse_beam_visited_mode(string value) {
     ) {
         return BeamVisitedMode::Fingerprint128Disk;
     }
+    if (
+        value == "3" ||
+        value == "layer" ||
+        value == "layer_only" ||
+        value == "layeronly" ||
+        value == "no_global" ||
+        value == "no_global_visited"
+    ) {
+        return BeamVisitedMode::LayerOnly;
+    }
     throw invalid_argument(
-        "beam_visited_mode must be exact/0, fingerprint128/1, or fingerprint128_disk/2"
+        "beam_visited_mode must be exact/0, fingerprint128/1, fingerprint128_disk/2, or layer_only/3"
     );
 }
 

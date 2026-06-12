@@ -1,11 +1,11 @@
-﻿# Q3-Q9 Hypercube Token Swapping
+﻿# Q3-Q10 Hypercube Token Swapping
 
 這個專案實作並驗證 hypercube 上的 zero-buffer token swapping，範圍包含：
 
 - **Minimum Token Swapping on Q3 Hypercube**
 - **Zero-buffer edge-swap routing shortest path**
 - **Q4 full-random benchmark**
-- **Q4-Q9 special-case Beam Search**
+- **Q4-Q10 special-case Beam Search**
 
 在三維超立方體 `Q3`（8 個節點）上，每一步只能沿合法邊交換兩端 token，目標是將任意初始 permutation 轉為 `(0,1,2,3,4,5,6,7)` 並最小化交換步數。
 
@@ -284,33 +284,36 @@ Basic A* 與 Strong A* 都是使用 admissible heuristic 的 A* 變體；Beam �
 
 備註：輸出 CSV 中的 `astar_*` 欄位對應 Basic A*。
 
-## Q4-Q9 Special Cases（`codex/sp`）
+## Q4-Q10 Special Cases（`codex/sp`）
 
-SP 分支加入模組化的 `qk` special-case runner，用來執行 Q4-Q9 指定 permutation。Q4 可執行 Strong A* 精確驗證；Q5 以上只跑 Beam Search 與 Batcher baseline，避免 Basic A* 的狀態空間爆炸。
+SP 分支加入模組化的 `qk` special-case runner，用來執行 Q4 以上指定 permutation。Q4 可執行 Strong A* 精確驗證；Q5 以上只跑 Beam Search 與 Batcher baseline，避免 Basic A* 的狀態空間爆炸。
 
 重構後的 special-case runner 分成：
 
 - `qk_common`：共用 state、swap、fingerprint 與 packed key。
 - `qk_hypercube`：hypercube edges、distance、lower bound 與 path validation。
-- `qk_search`：Strong A*、Beam Search、RAM fingerprint visited、SQLite disk fingerprint visited。
+- `qk_search`：Strong A*、Beam Search、RAM fingerprint visited、SQLite disk fingerprint visited、layer-only RAM Beam。
 - `qk_batcher`：Batcher baseline。
 - `qk_cases`：內建 case、custom CSV parsing 與 permutation validation。
 - `qk_io`：CSV escaping、progress display 與記憶體整理 helper。
 - `qk_special_cases.cpp`：CLI 參數、輸出檔案與整體 runner 流程。
 
-`custom_qk_cases.csv` 可暫存 Q10 case 資料；目前 runner 實際執行仍限制在 Q1-Q9，Q10 需要後續再調整搜尋策略與執行限制。
+`custom_qk_cases.csv` 目前包含 Q4-Q15 special cases；Q15 只有一個 case，其餘 Q4-Q14 各有兩個 case。正式保存到路徑 Excel 的最新大型結果是 Q10 case1。
 
 ### Beam visited 模式
 
-程式保留三種 visited 實作，可由命令列選擇：
+程式保留四種 visited 實作，可由命令列選擇：
 
 | 模式 | 說明 |
 |---|---|
 | `exact` | 保存完整 packed state，適用 Q1-Q8 |
 | `fingerprint128` | 128-bit fingerprint 保存在 RAM |
 | `fingerprint128_disk` | 128-bit fingerprint 分批保存在 SQLite |
+| `layer_only` | 只保留當前 Beam 與前 K 層 retained fingerprints，不保存全域 visited set |
 
 Q9 使用 `fingerprint128_disk`。Bloom filter 只負責快速判斷「一定沒出現過」；若可能存在，仍會檢查 RAM pending set 與 SQLite primary key，因此 Bloom false positive 不會直接刪除候選。
+
+Q10 case1 使用 `layer_only`。這個模式把 RAM 用在「近期 retained layer fingerprint window」與 per-layer candidate pool，不建立 SQLite visited database，也不記錄 candidate trace。完整 path 仍以 parent back-pointer 寫入暫存 path store，找到解後再回溯重建。
 
 ### Beam 簡化排序
 
@@ -325,9 +328,9 @@ edge_id
 packed_key / fingerprint / order
 ```
 
-這版不再使用舊 Beam 的九欄 tie-breaker，例如 `repeat_penalty`、`improvement`、`local_improvement`、`dir_score`、`touched_max_dist`。這樣做的重點是降低 per-candidate 狀態與路徑歷史成本，讓 Q8/Q9 可以搭配 fingerprint visited、disk visited 和平行候選產生穩定執行。排序本身仍是 heuristic Beam，不保證最短路徑；正確性由最後輸出的 path replay 驗證。
+這版不再使用舊 Beam 的九欄 tie-breaker，例如 `repeat_penalty`、`improvement`、`local_improvement`、`dir_score`、`touched_max_dist`。這樣做的重點是降低 per-candidate 狀態與路徑歷史成本，讓 Q8-Q10 可以搭配 fingerprint visited、disk visited 或 layer-only window 穩定執行。排序本身仍是 heuristic Beam，不保證最短路徑；正確性由最後輸出的 path replay 驗證。
 
-### Q9 記憶體與平行化改進
+### Q9/Q10 記憶體與平行化改進
 
 - Path 使用 parent back-pointer，只在找到解時 backtracking 重建。
 - Fingerprint 可在 swap 後 O(1) 增量更新。
@@ -338,6 +341,7 @@ packed_key / fingerprint / order
 - Candidate array 使用固定 parent/edge index，最後依原始順序提交，保持決定性搜尋順序。
 - 程序在 Windows 使用 `BelowNormal` priority，降低對前景操作的影響。
 - 正式 Q9 run 關閉 candidate trace，只保留深度進度、磁碟進度與最終 path。
+- Q10 RAM run 使用 `layer_only`，保留前 K 層 retained fingerprints，並以 deterministic perturbation 從 candidate pool 中抽取少量候選，增加搜尋多樣性。
 
 完整設計與驗證紀錄請參考 [Q9_BEAM_SEARCH_EVOLUTION.md](Q9_BEAM_SEARCH_EVOLUTION.md)。
 
@@ -363,6 +367,12 @@ qk_special_cases.exe
   [output_dir] [custom_cases_csv] [candidate_trace_mode=2]
   [case_name_filter] [beam_visited_mode=exact] [worker_threads=24]
   [disk_bloom_mb=1024] [disk_batch_size=1000000] [disk_shards=16]
+  [path_opt_window=0] [path_opt_passes=1] [path_opt_node_cap=200000]
+  [path_opt_segment_time_sec=0.25] [path_opt_threads=worker_threads]
+  [path_opt_stride=0] [path_opt_word_reduce=1]
+  [layer_pool_width=0] [layer_visited_window=0]
+  [layer_restart_max_width=0] [layer_plateau_limit=0]
+  [layer_restart_growth=2] [layer_perturbation_ratio=0.0]
 ```
 
 `candidate_trace_mode`：
@@ -385,6 +395,19 @@ qk_special_cases.exe
   fingerprint128_disk 24 1024 1000000 16
 ```
 
+### Q10 case1 layer-only RAM 指令
+
+Q10 case1 使用 `beam_width=512`、`layer_pool_width=4096`、`layer_visited_window=4096`、`layer_restart_max_width=512`、`layer_plateau_limit=512`、`layer_perturbation_ratio=0.10`。這輪不使用 SQLite visited database，`qk_beam_candidate_trace.csv` 維持 0 bytes。
+
+```powershell
+.\qk_special_cases.exe 10 10 512 0 0 2000000 30 `
+  output\q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936 `
+  .\custom_qk_cases.csv 0 q10_case1 `
+  layer_only 24 1024 1000000 16 `
+  0 1 200000 0.25 24 0 1 `
+  4096 4096 512 512 2 0.10
+```
+
 ### Special-case 結果
 
 所有下列 Beam 與 Batcher path 均通過 hypercube edge replay 驗證：
@@ -401,6 +424,7 @@ qk_special_cases.exe
 | Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
 | Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
 | Q9 | case2 | 1059 | 1563 | 914,621,697 | 10,559.491 | 5199 |
+| Q10 | case1 | 2560 | 3308 | 8,663,587,275 | 2,660.163 | 13,998 |
 
 Q9 case1：
 
@@ -425,6 +449,22 @@ Q9 case2：
 - Beam 比 Batcher 少約 `69.9%` swaps
 - `beam_path_valid=1`
 
+Q10 case1：
+
+- Beam mode：`layer_only`
+- Beam width：`512`
+- Layer pool width：`4096`
+- Layer visited window：`4096`
+- Perturbation ratio：`0.10`
+- 解深度：`3308`
+- Visited states：`8,663,587,276`
+- 執行時間：約 `44 分 20 秒`
+- Peak RAM：本輪監控約低於 `1 GB`
+- Beam 比 Batcher 少約 `76.4%` swaps
+- `beam_path_valid=1`
+
+Q10 case2 在同一輪開始後曾產生 partial depth progress，但已依需求停止；目前不列為正式完成結果。
+
 ### 成果檔
 
 - Q4-Q7：`output/qk_custom_cases_20260605_133247/`
@@ -432,6 +472,7 @@ Q9 case2：
 - Q8 case2：`output/q8_case2_trim_20260605_154927/`
 - Q9 case1：`output/q9_case1_disk_bw256_20260607_113040/`
 - Q9 case2：`output/q9_case2_disk_bw256_path_20260609_170556/`
+- Q10 case1：`output/q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936/`
 - 完整路徑 Excel：`output/qk_special_cases_routes.xlsx`
 - 自訂 cases：`custom_qk_cases.csv`
 
@@ -446,5 +487,5 @@ Q9 case2：
 
 ## 備註
 
-- `output/` 保留正式 Q4 benchmark、Q4-Q9 special-case 結果與完整路徑 Excel。
+- `output/` 保留正式 Q4 benchmark、Q4-Q10 special-case 結果與完整路徑 Excel。
 - `legacy/` 保存舊版與過時資料，包含 Q3 輸出、舊 Q4 測試、失敗或中止的 path run、smoke tests、verification experiments、舊報告與 saved runs。

@@ -43,9 +43,20 @@ add_executable(qk_special_cases
     src/qk_hypercube.cpp
     src/qk_io.cpp
     src/qk_search.cpp
+    src/qk_path_optimizer.cpp
     src/qk_batcher.cpp
     src/qk_cases.cpp
     src/qk_special_cases.cpp
 )
 target_include_directories(qk_special_cases PRIVATE include)
 target_link_libraries(qk_special_cases PRIVATE Threads::Threads SQLite::SQLite3)
+
+add_executable(qk_optimize_path
+    src/qk_common.cpp
+    src/qk_hypercube.cpp
+    src/qk_io.cpp
+    src/qk_path_optimizer.cpp
+    src/qk_optimize_path.cpp
+)
+target_include_directories(qk_optimize_path PRIVATE include)
+target_link_libraries(qk_optimize_path PRIVATE Threads::Threads)

@@ -2,6 +2,7 @@
 #include "qk/cases.h"
 #include "qk/hypercube.h"
 #include "qk/io.h"
+#include "qk/path_optimizer.h"
 #include "qk/search.h"
 
 #include <chrono>
@@ -37,13 +38,28 @@ void print_usage(const char* exe) {
          << " [exact_max_dim=4] [astar_cap=2000000] [exact_time_sec=30]"
          << " [output_dir=output/qk_special_cases] [custom_cases_csv] [candidate_trace_mode=2]"
          << " [case_name_filter] [beam_visited_mode=exact] [worker_threads=24]"
-         << " [disk_bloom_mb=1024] [disk_batch_size=1000000] [disk_shards=16]\n"
+         << " [disk_bloom_mb=1024] [disk_batch_size=1000000] [disk_shards=16]"
+         << " [path_opt_window=0] [path_opt_passes=1] [path_opt_node_cap=200000]"
+         << " [path_opt_segment_time_sec=0.25] [path_opt_threads=worker_threads]"
+         << " [path_opt_stride=0] [path_opt_word_reduce=1]"
+         << " [layer_pool_width=0] [layer_visited_window=0]"
+         << " [layer_restart_max_width=0] [layer_plateau_limit=0] [layer_restart_growth=2]"
+         << " [layer_perturbation_ratio=0.0]\n"
          << "max_depth=0 uses auto depth dim * 2^dim for each Qdim.\n";
     cerr << "Use custom_cases_csv=- to select built-in cases while passing later options.\n";
     cerr << "candidate_trace_mode: 0=none, 1=retained beam only, 2=all new candidates.\n";
     cerr << "beam_visited_mode: exact/0 stores full packed states (Q1..Q8); "
          << "fingerprint128/1 stores fingerprints in RAM; "
-         << "fingerprint128_disk/2 stores exact fingerprints in SQLite.\n";
+         << "fingerprint128_disk/2 stores exact fingerprints in SQLite; "
+         << "layer_only/3 keeps only retained-layer fingerprints and does not keep global visited states.\n";
+    cerr << "layer_pool_width: only for layer_only; 0 uses the default small oversampling pool, "
+         << "otherwise this sets the per-layer candidate pool before deduping down to beam_width.\n";
+    cerr << "layer_visited_window: only for layer_only; records retained fingerprints from the previous K layers.\n";
+    cerr << "layer_restart_max_width/layer_plateau_limit/layer_restart_growth: only for layer_only; "
+         << "when best total distance does not improve for plateau_limit layers, restart from the initial state "
+         << "with a larger beam width up to restart_max_width.\n";
+    cerr << "layer_perturbation_ratio: only for layer_only; fraction of retained beam slots selected by "
+         << "deterministic hash perturbation from the candidate pool instead of pure greedy ranking.\n";
 }
 
 } // namespace qk
@@ -68,6 +84,19 @@ int main(int argc, char** argv) {
     size_t disk_bloom_mb = 1024;
     size_t disk_batch_size = 1000000;
     int disk_shards = 16;
+    int path_opt_window = 0;
+    int path_opt_passes = 1;
+    size_t path_opt_node_cap = 200000;
+    double path_opt_segment_time_sec = 0.25;
+    int path_opt_threads = 0;
+    int path_opt_stride = 0;
+    bool path_opt_word_reduce = true;
+    int layer_pool_width = 0;
+    int layer_visited_window = 0;
+    int layer_restart_max_width = 0;
+    int layer_plateau_limit = 0;
+    int layer_restart_growth = 2;
+    double layer_perturbation_ratio = 0.0;
 
     try {
         if (argc > 1) min_dim = stoi(argv[1]);
@@ -92,14 +121,28 @@ int main(int argc, char** argv) {
         if (argc > 14) disk_bloom_mb = stoull(argv[14]);
         if (argc > 15) disk_batch_size = stoull(argv[15]);
         if (argc > 16) disk_shards = stoi(argv[16]);
+        if (argc > 17) path_opt_window = stoi(argv[17]);
+        if (argc > 18) path_opt_passes = stoi(argv[18]);
+        if (argc > 19) path_opt_node_cap = stoull(argv[19]);
+        if (argc > 20) path_opt_segment_time_sec = stod(argv[20]);
+        if (argc > 21) path_opt_threads = stoi(argv[21]);
+        if (argc > 22) path_opt_stride = stoi(argv[22]);
+        if (argc > 23) path_opt_word_reduce = stoi(argv[23]) != 0;
+        if (argc > 24) layer_pool_width = stoi(argv[24]);
+        if (argc > 25) layer_visited_window = stoi(argv[25]);
+        if (argc > 26) layer_restart_max_width = stoi(argv[26]);
+        if (argc > 27) layer_plateau_limit = stoi(argv[27]);
+        if (argc > 28) layer_restart_growth = stoi(argv[28]);
+        if (argc > 29) layer_perturbation_ratio = stod(argv[29]);
+        if (case_name_filter == "-") case_name_filter.clear();
     } catch (const exception& e) {
         cerr << "Argument parse error: " << e.what() << "\n";
         print_usage(argv[0]);
         return 2;
     }
 
-    if (min_dim < 1 || max_dim < min_dim || max_dim > 9) {
-        cerr << "Dimensions must satisfy 1 <= min_dim <= max_dim <= 9.\n";
+    if (min_dim < 1 || max_dim < min_dim || max_dim > 15) {
+        cerr << "Dimensions must satisfy 1 <= min_dim <= max_dim <= 15.\n";
         return 2;
     }
     if (exact_max_dim < 0 || exact_max_dim > 8) {
@@ -107,7 +150,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (beam_visited_mode == BeamVisitedMode::ExactPacked && max_dim > 8) {
-        cerr << "exact Beam visited supports only Q1..Q8; use fingerprint128 for Q9.\n";
+        cerr << "exact Beam visited supports only Q1..Q8; use fingerprint128, fingerprint128_disk, or layer_only for larger cases.\n";
         return 2;
     }
     if (beam_width <= 0) {
@@ -122,11 +165,53 @@ int main(int argc, char** argv) {
         cerr << "disk_bloom_mb, disk_batch_size, and disk_shards must be positive.\n";
         return 2;
     }
+    if (path_opt_window < 0 || path_opt_passes <= 0 ||
+        path_opt_segment_time_sec < 0.0 || path_opt_stride < 0) {
+        cerr << "path_opt_window must be >= 0, path_opt_passes must be positive, "
+             << "path_opt_segment_time_sec must be >= 0, and path_opt_stride must be >= 0.\n";
+        return 2;
+    }
+    if (layer_pool_width < 0) {
+        cerr << "layer_pool_width must be >= 0.\n";
+        return 2;
+    }
+    if (layer_visited_window < 0) {
+        cerr << "layer_visited_window must be >= 0.\n";
+        return 2;
+    }
+    if (layer_restart_max_width < 0 || layer_plateau_limit < 0 || layer_restart_growth < 1) {
+        cerr << "layer_restart_max_width and layer_plateau_limit must be >= 0; layer_restart_growth must be >= 1.\n";
+        return 2;
+    }
+    if (layer_restart_max_width > 0 && layer_restart_max_width < beam_width) {
+        cerr << "layer_restart_max_width must be 0 or >= beam_width.\n";
+        return 2;
+    }
+    if (layer_perturbation_ratio < 0.0 || layer_perturbation_ratio > 1.0) {
+        cerr << "layer_perturbation_ratio must be between 0.0 and 1.0.\n";
+        return 2;
+    }
+    if (path_opt_threads <= 0) {
+        path_opt_threads = worker_threads;
+    }
+    if (path_opt_threads <= 0) {
+        cerr << "path_opt_threads must be positive.\n";
+        return 2;
+    }
     if (candidate_trace_mode_arg < 0 || candidate_trace_mode_arg > 2) {
         cerr << "candidate_trace_mode must be 0, 1, or 2.\n";
         return 2;
     }
     CandidateTraceMode candidate_trace_mode = static_cast<CandidateTraceMode>(candidate_trace_mode_arg);
+    PathOptimizerOptions path_optimizer_options;
+    path_optimizer_options.enabled = path_opt_window > 0;
+    path_optimizer_options.max_window = path_opt_window;
+    path_optimizer_options.passes = path_opt_passes;
+    path_optimizer_options.node_cap = path_opt_node_cap;
+    path_optimizer_options.segment_time_sec = path_opt_segment_time_sec;
+    path_optimizer_options.worker_threads = path_opt_threads;
+    path_optimizer_options.window_stride = path_opt_stride;
+    path_optimizer_options.word_reduction = path_opt_word_reduce;
 
 #ifdef _WIN32
     if (beam_visited_mode == BeamVisitedMode::Fingerprint128Disk) {
@@ -186,12 +271,17 @@ int main(int argc, char** argv) {
         << "exact_status,exact_steps,exact_expanded,exact_states,exact_sec,exact_path_valid,"
         << "beam_visited_mode,beam_status,beam_steps,beam_expanded,beam_states,beam_sec,beam_path_valid,beam_gap_vs_exact,"
         << "batcher_success,batcher_swaps,batcher_compares,batcher_rounds,batcher_sec,batcher_path_valid,batcher_gap_vs_exact,"
-        << "state_perm,beam_path,batcher_path\n";
+        << "optimized_status,optimized_steps,optimized_improvement,optimized_word_reductions,"
+        << "optimized_attempts,optimized_segments,"
+        << "optimized_expanded,optimized_states,optimized_sec,optimized_path_valid,"
+        << "state_perm,beam_path,optimized_path,batcher_path\n";
 
     ofstream checkpoint_csv(checkpoint_csv_path);
     checkpoint_csv << "completed_case,total_cases,dim,case_name,total_dist,strong_lb,"
                    << "exact_status,exact_steps,exact_sec,exact_path_valid,"
                    << "beam_visited_mode,beam_status,beam_steps,beam_sec,beam_path_valid,"
+                   << "optimized_status,optimized_steps,optimized_improvement,optimized_word_reductions,"
+                   << "optimized_sec,optimized_path_valid,"
                    << "batcher_success,batcher_swaps,batcher_sec,batcher_path_valid,"
                    << "elapsed_sec\n";
 
@@ -221,6 +311,20 @@ int main(int argc, char** argv) {
          << ", disk_bloom_mb=" << disk_bloom_mb
          << ", disk_batch_size=" << disk_batch_size
          << ", disk_shards=" << disk_shards
+         << ", path_opt_window=" << path_opt_window
+         << ", path_opt_passes=" << path_opt_passes
+         << ", path_opt_node_cap=" << path_opt_node_cap
+         << ", path_opt_segment_time_sec=" << setprecision(3) << path_opt_segment_time_sec
+         << setprecision(0)
+         << ", path_opt_threads=" << path_opt_threads
+         << ", path_opt_stride=" << path_opt_stride
+         << ", path_opt_word_reduce=" << (path_opt_word_reduce ? 1 : 0)
+         << ", layer_pool_width=" << layer_pool_width
+         << ", layer_visited_window=" << layer_visited_window
+         << ", layer_restart_max_width=" << layer_restart_max_width
+         << ", layer_plateau_limit=" << layer_plateau_limit
+         << ", layer_restart_growth=" << layer_restart_growth
+         << ", layer_perturbation_ratio=" << fixed << setprecision(3) << layer_perturbation_ratio
          << ", output_dir=" << output_dir.generic_string() << "\n";
     if (use_custom_cases) {
         cout << "custom_cases=" << custom_cases_path.generic_string() << "\n";
@@ -292,20 +396,98 @@ int main(int argc, char** argv) {
                     candidate_trace_mode
                 );
             } else {
-                beam = beam_search(
-                    c.state,
-                    es,
-                    beam_width,
-                    dim_max_depth,
-                    true,
-                    progress,
-                    &beam_depth_csv,
-                    &beam_candidate_trace_csv,
-                    candidate_trace_mode,
-                    beam_visited_mode
-                );
+                int active_beam_width = beam_width;
+                PathResult combined_beam;
+                bool has_combined_beam = false;
+
+                while (true) {
+                    PathResult attempt = beam_search(
+                        c.state,
+                        es,
+                        active_beam_width,
+                        dim_max_depth,
+                        true,
+                        progress,
+                        &beam_depth_csv,
+                        &beam_candidate_trace_csv,
+                        candidate_trace_mode,
+                        beam_visited_mode,
+                        worker_threads,
+                        layer_pool_width,
+                        layer_visited_window,
+                        layer_plateau_limit,
+                        layer_perturbation_ratio
+                    );
+
+                    string attempt_status = attempt.status;
+                    long long attempt_expanded = attempt.expanded;
+                    double attempt_sec = attempt.sec;
+
+                    if (!has_combined_beam) {
+                        combined_beam = move(attempt);
+                        has_combined_beam = true;
+                    } else {
+                        combined_beam.expanded += attempt.expanded;
+                        combined_beam.reached_states += attempt.reached_states;
+                        combined_beam.sec += attempt.sec;
+                        combined_beam.steps = attempt.steps;
+                        combined_beam.status = move(attempt.status);
+                        combined_beam.swaps = move(attempt.swaps);
+                    }
+
+                    bool can_restart =
+                        beam_visited_mode == BeamVisitedMode::LayerOnly &&
+                        layer_plateau_limit > 0 &&
+                        layer_restart_max_width > active_beam_width &&
+                        attempt_status == "plateau";
+                    if (!can_restart) {
+                        beam = move(combined_beam);
+                        break;
+                    }
+
+                    int next_beam_width = static_cast<int>(min<long long>(
+                        layer_restart_max_width,
+                        max<long long>(
+                            static_cast<long long>(active_beam_width) + 1,
+                            static_cast<long long>(active_beam_width) * layer_restart_growth
+                        )
+                    ));
+                    clear_progress_line();
+                    cout << "    beam plateau: width=" << active_beam_width
+                         << ", expanded=" << attempt_expanded
+                         << ", sec=" << fixed << setprecision(3) << attempt_sec
+                         << "; restart width=" << next_beam_width << "\n";
+                    active_beam_width = next_beam_width;
+                    trim_process_memory();
+                }
             }
             trim_process_memory();
+
+            PathOptimizerResult optimized;
+            if (path_optimizer_options.enabled && beam.status == "solved") {
+                print_progress_line(
+                    progress,
+                    "path_opt",
+                    0,
+                    max<long long>(1, beam.steps),
+                    beam.expanded
+                );
+                optimized = optimize_path_shortcuts(
+                    c.state,
+                    es,
+                    beam.swaps,
+                    path_optimizer_options
+                );
+                trim_process_memory();
+            } else {
+                optimized.status = path_optimizer_options.enabled ? "skipped" : "disabled";
+                optimized.original_steps = beam.steps;
+                optimized.optimized_steps = beam.steps;
+                if (beam.status == "solved") {
+                    optimized.swaps = beam.swaps;
+                }
+            }
+
             print_progress_line(progress, "batcher", 1, 1, 0);
             BatcherResult batcher = batcher_baseline(c.state, true);
 
@@ -314,6 +496,11 @@ int main(int argc, char** argv) {
                 exact_valid = false;
             }
             bool beam_valid = beam.steps == 0 || (beam.steps > 0 && path_reaches_goal(c.state, beam.swaps, dim));
+            bool optimized_valid =
+                path_optimizer_options.enabled &&
+                beam.status == "solved" &&
+                (optimized.optimized_steps == 0 ||
+                 (optimized.optimized_steps > 0 && path_reaches_goal(c.state, optimized.swaps, dim)));
             bool batcher_valid = batcher.success && path_reaches_goal(c.state, batcher.path, dim);
 
             if (exact.status == "solved") {
@@ -337,6 +524,8 @@ int main(int argc, char** argv) {
                  << "(" << setw(3) << exact.steps << ")"
                  << " beam=" << setw(7) << beam.status
                  << "(" << setw(3) << beam.steps << ")"
+                 << " opt=" << setw(14) << optimized.status
+                 << "(" << setw(3) << optimized.optimized_steps << ",-" << optimized.improvement << ")"
                  << " batcher=" << (batcher.success ? "ok" : "fail")
                  << "(" << batcher.swaps << ")\n";
 
@@ -350,8 +539,18 @@ int main(int argc, char** argv) {
                 << beam.sec << "," << (beam_valid ? 1 : 0) << "," << beam_gap << ","
                 << (batcher.success ? 1 : 0) << "," << batcher.swaps << "," << batcher.compares << "," << batcher.rounds << ","
                 << batcher.sec << "," << (batcher_valid ? 1 : 0) << "," << batcher_gap << ","
+                << optimized.status << "," << optimized.optimized_steps << "," << optimized.improvement << ","
+                << optimized.word_reductions << ","
+                << optimized.attempts << "," << optimized.improved_segments << ","
+                << optimized.expanded << "," << optimized.reached_states << "," << optimized.sec << ","
+                << (optimized_valid ? 1 : 0) << ","
                 << csv_escape(state_perm(c.state)) << ","
                 << csv_escape(path_string(beam.swaps)) << ","
+                << csv_escape(
+                    path_optimizer_options.enabled && beam.status == "solved"
+                        ? path_string(optimized.swaps)
+                        : string()
+                ) << ","
                 << csv_escape(path_string(batcher.path)) << "\n";
             csv.flush();
 
@@ -363,6 +562,9 @@ int main(int argc, char** argv) {
                            << fixed << setprecision(6) << exact.sec << "," << (exact_valid ? 1 : 0) << ","
                            << beam_visited_mode_name(beam_visited_mode) << ","
                            << beam.status << "," << beam.steps << "," << beam.sec << "," << (beam_valid ? 1 : 0) << ","
+                           << optimized.status << "," << optimized.optimized_steps << "," << optimized.improvement << ","
+                           << optimized.word_reductions << ","
+                           << optimized.sec << "," << (optimized_valid ? 1 : 0) << ","
                            << (batcher.success ? 1 : 0) << "," << batcher.swaps << "," << batcher.sec << ","
                            << (batcher_valid ? 1 : 0) << "," << elapsed_sec << "\n";
             checkpoint_csv.flush();

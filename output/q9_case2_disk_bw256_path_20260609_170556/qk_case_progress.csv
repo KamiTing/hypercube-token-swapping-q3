@@ -1,0 +1,2 @@
+completed_case,total_cases,dim,case_name,total_dist,strong_lb,exact_status,exact_steps,exact_sec,exact_path_valid,beam_visited_mode,beam_status,beam_steps,beam_sec,beam_path_valid,batcher_success,batcher_swaps,batcher_sec,batcher_path_valid,elapsed_sec
+1,1,9,"q9_case2",2118,1059,skipped,-1,0.000000,0,fingerprint128_disk,solved,1563,10559.491162,1,1,5199,0.000188,1,10560.859939

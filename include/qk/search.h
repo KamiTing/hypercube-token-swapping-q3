@@ -29,7 +29,12 @@ PathResult beam_search(
     std::ofstream* depth_progress_csv,
     std::ofstream* candidate_trace_csv,
     CandidateTraceMode trace_mode,
-    BeamVisitedMode visited_mode
+    BeamVisitedMode visited_mode,
+    int worker_threads = 1,
+    int layer_pool_width = 0,
+    int layer_visited_window = 0,
+    int layer_plateau_limit = 0,
+    double layer_perturbation_ratio = 0.0
 );
 
 PathResult beam_search_disk(

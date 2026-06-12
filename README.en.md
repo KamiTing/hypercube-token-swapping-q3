@@ -1,11 +1,11 @@
-﻿# Q3-Q9 Hypercube Token Swapping
+﻿# Q3-Q10 Hypercube Token Swapping
 
 This project implements and validates zero-buffer token swapping on hypercubes, including:
 
 - **Minimum Token Swapping on Q3 Hypercube**
 - **Zero-buffer edge-swap routing shortest path**
 - **Q4 full-random benchmark**
-- **Q4-Q9 special-case Beam Search**
+- **Q4-Q10 special-case Beam Search**
 
 On a 3-dimensional hypercube `Q3` (8 nodes), each step can only swap the two tokens on a legal edge. The goal is to transform any initial permutation into `(0,1,2,3,4,5,6,7)` with the minimum number of swaps.
 
@@ -284,33 +284,36 @@ Basic A* and Strong A* are A* variants with admissible heuristics; Beam is a fas
 
 Note: the `astar_*` columns in CSV outputs correspond to Basic A*.
 
-## Q4-Q9 Special Cases (`codex/sp`)
+## Q4-Q10 Special Cases (`codex/sp`)
 
-The SP branch adds a modular `qk` special-case runner for specified Q4-Q9 permutations. Q4 can use Strong A* for exact verification. Q5 and above run only Beam Search and the Batcher baseline to avoid Basic A* state-space explosion.
+The SP branch adds a modular `qk` special-case runner for specified Q4-and-above permutations. Q4 can use Strong A* for exact verification. Q5 and above run only Beam Search and the Batcher baseline to avoid Basic A* state-space explosion.
 
 After the refactor, the special-case runner is split into:
 
 - `qk_common`: shared state, swap, fingerprint, and packed-key types.
 - `qk_hypercube`: hypercube edges, distances, lower bounds, and path validation.
-- `qk_search`: Strong A*, Beam Search, RAM fingerprint visited storage, and SQLite disk fingerprint visited storage.
+- `qk_search`: Strong A*, Beam Search, RAM fingerprint visited storage, SQLite disk fingerprint visited storage, and layer-only RAM Beam.
 - `qk_batcher`: Batcher baseline.
 - `qk_cases`: built-in cases, custom CSV parsing, and permutation validation.
 - `qk_io`: CSV escaping, progress display, and memory-trimming helpers.
 - `qk_special_cases.cpp`: CLI arguments, output files, and the top-level runner flow.
 
-`custom_qk_cases.csv` can hold Q10 case data for future experiments. The current runner still executes only Q1-Q9; Q10 needs later search-strategy and execution-limit changes.
+`custom_qk_cases.csv` currently contains Q4-Q15 special cases. Q15 has one case; Q4-Q14 have two cases each. The latest large result saved into the route workbook is Q10 case1.
 
 ### Beam visited modes
 
-Three visited implementations remain selectable from the command line:
+Four visited implementations remain selectable from the command line:
 
 | Mode | Description |
 |---|---|
 | `exact` | Stores the full packed state and supports Q1-Q8 |
 | `fingerprint128` | Stores 128-bit fingerprints in RAM |
 | `fingerprint128_disk` | Stores 128-bit fingerprints in batched SQLite databases |
+| `layer_only` | Keeps only the current Beam and retained fingerprints from the previous K layers, with no global visited set |
 
 Q9 uses `fingerprint128_disk`. The Bloom filter is only a fast negative filter. Possible hits are still checked against the in-memory pending set and the SQLite primary key, so Bloom false positives do not directly discard candidates.
+
+Q10 case1 uses `layer_only`. This mode spends RAM on the recent retained-layer fingerprint window and the per-layer candidate pool. It does not create a SQLite visited database and does not record a candidate trace. Full paths are still stored through parent back-pointers in a temporary path store and reconstructed after a solution is found.
 
 ### Simplified Beam ordering
 
@@ -325,9 +328,9 @@ edge_id
 packed_key / fingerprint / order
 ```
 
-This version no longer uses the older nine-field Beam tie-breaker, such as `repeat_penalty`, `improvement`, `local_improvement`, `dir_score`, and `touched_max_dist`. The goal is to reduce per-candidate state and path-history overhead so Q8/Q9 can run reliably with fingerprint visited storage, disk visited storage, and parallel candidate generation. The ordering is still a heuristic Beam policy and does not guarantee shortest paths; final correctness is checked by replaying the output path.
+This version no longer uses the older nine-field Beam tie-breaker, such as `repeat_penalty`, `improvement`, `local_improvement`, `dir_score`, and `touched_max_dist`. The goal is to reduce per-candidate state and path-history overhead so Q8-Q10 can run reliably with fingerprint visited storage, disk visited storage, or layer-only windows. The ordering is still a heuristic Beam policy and does not guarantee shortest paths; final correctness is checked by replaying the output path.
 
-### Q9 memory and parallel improvements
+### Q9/Q10 memory and parallel improvements
 
 - Paths use parent back-pointers and are reconstructed only after a solution is found.
 - Fingerprints are updated in O(1) after a swap.
@@ -338,6 +341,7 @@ This version no longer uses the older nine-field Beam tie-breaker, such as `repe
 - Fixed parent/edge indices and an original-order commit pass preserve deterministic search ordering.
 - The Windows process runs at `BelowNormal` priority to preserve desktop responsiveness.
 - The final Q9 run disables candidate tracing and records only depth progress, disk progress, and the final path.
+- The Q10 RAM run uses `layer_only`, keeps retained fingerprints from the previous K layers, and uses deterministic perturbation to select a small fraction of retained candidates from the wider candidate pool.
 
 See [Q9_BEAM_SEARCH_EVOLUTION.md](Q9_BEAM_SEARCH_EVOLUTION.md) for the complete design and validation record.
 
@@ -363,6 +367,12 @@ qk_special_cases.exe
   [output_dir] [custom_cases_csv] [candidate_trace_mode=2]
   [case_name_filter] [beam_visited_mode=exact] [worker_threads=24]
   [disk_bloom_mb=1024] [disk_batch_size=1000000] [disk_shards=16]
+  [path_opt_window=0] [path_opt_passes=1] [path_opt_node_cap=200000]
+  [path_opt_segment_time_sec=0.25] [path_opt_threads=worker_threads]
+  [path_opt_stride=0] [path_opt_word_reduce=1]
+  [layer_pool_width=0] [layer_visited_window=0]
+  [layer_restart_max_width=0] [layer_plateau_limit=0]
+  [layer_restart_growth=2] [layer_perturbation_ratio=0.0]
 ```
 
 `candidate_trace_mode`:
@@ -385,6 +395,19 @@ qk_special_cases.exe
   fingerprint128_disk 24 1024 1000000 16
 ```
 
+### Q10 case1 layer-only RAM command
+
+Q10 case1 uses `beam_width=512`, `layer_pool_width=4096`, `layer_visited_window=4096`, `layer_restart_max_width=512`, `layer_plateau_limit=512`, and `layer_perturbation_ratio=0.10`. This run does not use a SQLite visited database, and `qk_beam_candidate_trace.csv` remains 0 bytes.
+
+```powershell
+.\qk_special_cases.exe 10 10 512 0 0 2000000 30 `
+  output\q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936 `
+  .\custom_qk_cases.csv 0 q10_case1 `
+  layer_only 24 1024 1000000 16 `
+  0 1 200000 0.25 24 0 1 `
+  4096 4096 512 512 2 0.10
+```
+
 ### Special-case results
 
 Every Beam and Batcher path below passed hypercube-edge replay validation:
@@ -401,6 +424,7 @@ Every Beam and Batcher path below passed hypercube-edge replay validation:
 | Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
 | Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
 | Q9 | case2 | 1059 | 1563 | 914,621,697 | 10,559.491 | 5199 |
+| Q10 | case1 | 2560 | 3308 | 8,663,587,275 | 2,660.163 | 13,998 |
 
 Q9 case1:
 
@@ -425,6 +449,22 @@ Q9 case2:
 - Beam uses about `69.9%` fewer swaps than Batcher
 - `beam_path_valid=1`
 
+Q10 case1:
+
+- Beam mode: `layer_only`
+- Beam width: `512`
+- Layer pool width: `4096`
+- Layer visited window: `4096`
+- Perturbation ratio: `0.10`
+- Solution depth: `3308`
+- Visited states: `8,663,587,276`
+- Runtime: about `44 minutes 20 seconds`
+- Peak RAM: monitored under about `1 GB` in this run
+- Beam uses about `76.4%` fewer swaps than Batcher
+- `beam_path_valid=1`
+
+Q10 case2 produced partial depth progress after the same run moved on to it, but it was intentionally stopped and is not listed as a formal completed result.
+
 ### Artifacts
 
 - Q4-Q7: `output/qk_custom_cases_20260605_133247/`
@@ -432,6 +472,7 @@ Q9 case2:
 - Q8 case2: `output/q8_case2_trim_20260605_154927/`
 - Q9 case1: `output/q9_case1_disk_bw256_20260607_113040/`
 - Q9 case2: `output/q9_case2_disk_bw256_path_20260609_170556/`
+- Q10 case1: `output/q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936/`
 - Complete route workbook: `output/qk_special_cases_routes.xlsx`
 - Custom cases: `custom_qk_cases.csv`
 
@@ -446,5 +487,5 @@ Q9 case2:
 
 ## Notes
 
-- `output/` keeps the official Q4 benchmark, Q4-Q9 special-case results, and the complete route workbook.
+- `output/` keeps the official Q4 benchmark, Q4-Q10 special-case results, and the complete route workbook.
 - `legacy/` stores older and outdated data, including Q3 outputs, previous Q4 runs, failed or aborted path runs, smoke tests, verification experiments, old reports, and saved runs.

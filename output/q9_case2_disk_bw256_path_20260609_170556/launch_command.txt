@@ -1,0 +1,1 @@
+﻿"C:\Users\tingt\OneDrive\桌面\高等演算法\Final-SP\qk_special_cases.exe" 9 9 256 4608 0 2000000 30 output\q9_case2_disk_bw256_path_20260609_170556 .\custom_qk_cases.csv 0 q9_case2 fingerprint128_disk 24 1024 1000000 16

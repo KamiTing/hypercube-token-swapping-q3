@@ -56,7 +56,8 @@ enum class CandidateTraceMode {
 enum class BeamVisitedMode {
     ExactPacked = 0,
     Fingerprint128 = 1,
-    Fingerprint128Disk = 2
+    Fingerprint128Disk = 2,
+    LayerOnly = 3
 };
 
 struct ProgressContext {

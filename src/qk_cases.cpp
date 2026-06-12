@@ -235,9 +235,9 @@ map<int, vector<SpecialCase>> read_custom_cases(const filesystem::path& path) {
         }
 
         int dim = stoi(fields[0]);
-        if (dim < 1 || dim > 10) {
+        if (dim < 1 || dim > 15) {
             ostringstream msg;
-            msg << "line " << line_no << ": supported custom CSV dimensions are Q1..Q10, got Q" << dim;
+            msg << "line " << line_no << ": supported custom CSV dimensions are Q1..Q15, got Q" << dim;
             throw runtime_error(msg.str());
         }
 
