@@ -1,5 +1,6 @@
 #include "qk/search.h"
 
+#include "qk/cuda_candidate_generator.h"
 #include "qk/hypercube.h"
 #include "qk/io.h"
 
@@ -579,11 +580,14 @@ public:
         if (!enabled()) {
             return;
         }
+        last_added_ = fingerprints;
+        last_add_evicted_ = false;
         for (const Fingerprint128& fingerprint : fingerprints) {
             counts_[fingerprint]++;
         }
         layers_.push_back(move(fingerprints));
         while (static_cast<int>(layers_.size()) > max_rounds_) {
+            last_add_evicted_ = true;
             for (const Fingerprint128& fingerprint : layers_.front()) {
                 auto it = counts_.find(fingerprint);
                 if (it == counts_.end()) {
@@ -596,17 +600,54 @@ public:
             }
             layers_.pop_front();
         }
+        version_++;
     }
 
     size_t unique_size() const {
         return counts_.size();
     }
 
+    vector<Fingerprint128> fingerprints() const {
+        vector<Fingerprint128> result;
+        result.reserve(counts_.size());
+        for (const auto& entry : counts_) {
+            result.push_back(entry.first);
+        }
+        return result;
+    }
+
+    uint64_t version() const {
+        return version_;
+    }
+
+    const vector<Fingerprint128>& last_added() const {
+        return last_added_;
+    }
+
+    bool last_add_evicted() const {
+        return last_add_evicted_;
+    }
+
 private:
     int max_rounds_ = 0;
     deque<vector<Fingerprint128>> layers_;
     unordered_map<Fingerprint128, int, Fingerprint128Hash> counts_;
+    uint64_t version_ = 0;
+    vector<Fingerprint128> last_added_;
+    bool last_add_evicted_ = false;
 };
+
+size_t cuda_recent_slot_count(size_t fingerprint_count) {
+    if (fingerprint_count == 0) {
+        return 0;
+    }
+    size_t value = max<size_t>(fingerprint_count * 2, 2);
+    value--;
+    for (size_t shift = 1; shift < sizeof(size_t) * 8; shift <<= 1) {
+        value |= value >> shift;
+    }
+    return value + 1;
+}
 
 struct BeamCandidate {
     int total_dist = 0;
@@ -620,6 +661,7 @@ struct BeamCandidate {
     Fingerprint128 fingerprint;
     bool has_packed_key = false;
     long long order = 0;
+    int parent_beam_index = -1;
 };
 
 vector<SwapStep> reconstruct_beam_path(
@@ -723,20 +765,20 @@ vector<BeamCandidate> select_layer_only_retained(
                 choices.push_back({perturbation_key(sorted_candidates[i], depth), i});
             }
         }
-        sort(
-            choices.begin(),
-            choices.end(),
-            [](const PerturbChoice& a, const PerturbChoice& b) {
-                if (a.key != b.key) {
-                    return a.key < b.key;
-                }
-                return a.index < b.index;
+        auto perturb_heap_worse = [](const PerturbChoice& a, const PerturbChoice& b) {
+            if (a.key != b.key) {
+                return a.key > b.key;
             }
-        );
-        for (const PerturbChoice& choice : choices) {
+            return a.index > b.index;
+        };
+        make_heap(choices.begin(), choices.end(), perturb_heap_worse);
+        while (!choices.empty()) {
             if (static_cast<int>(retained.size()) >= beam_width) {
                 break;
             }
+            pop_heap(choices.begin(), choices.end(), perturb_heap_worse);
+            PerturbChoice choice = choices.back();
+            choices.pop_back();
             keep_index(choice.index);
         }
     }
@@ -784,6 +826,48 @@ void write_beam_depth_progress(
     csv->flush();
 }
 
+void write_cuda_timing(
+    ofstream* csv,
+    const ProgressContext& progress,
+    int depth,
+    const CudaLayerTiming& timing
+) {
+    if (csv == nullptr) {
+        return;
+    }
+
+    *csv << progress.case_index << "," << progress.total_cases << ","
+         << progress.dim << "," << csv_escape(progress.case_name) << ","
+         << depth << ","
+         << timing.parent_count << "," << timing.edge_count << ","
+         << timing.logical_candidates << "," << timing.chunk_candidates << ","
+         << timing.chunks << ","
+         << timing.recent_fingerprints << "," << timing.recent_table_slots << ","
+         << timing.topk_mode << "," << timing.topk_tiles << "," << timing.topk_tile_candidates << ","
+         << timing.valid_candidates << ","
+         << fixed << setprecision(6)
+         << timing.host_prepare_sec << ","
+         << timing.device_alloc_sec << ","
+         << timing.h2d_sec << ","
+         << timing.recent_update_sec << ","
+         << timing.kernel_sec << ","
+         << timing.sort_sec << ","
+         << timing.d2h_sec << ","
+         << timing.cpu_merge_sec << ","
+         << timing.topk_select_sec << ","
+         << timing.retained_select_sec << ","
+         << timing.materialize_sec << ","
+         << timing.total_sec << ","
+         << timing.outer_parent_prepare_sec << ","
+         << timing.outer_recent_snapshot_sec << ","
+         << timing.outer_cuda_call_sec << ","
+         << timing.outer_candidate_convert_sec << ","
+         << timing.outer_progress_write_sec << ","
+         << timing.outer_recent_add_sec << ","
+         << timing.outer_layer_sec << "\n";
+    csv->flush();
+}
+
 void write_beam_candidate_trace(
     ofstream* csv,
     const ProgressContext& progress,
@@ -815,6 +899,8 @@ struct LayerParallelResult {
     int solved_parent_path_node = -1;
     SwapStep solved_step{-1, -1};
 };
+
+array<int, 16> distance_histogram(const State& state);
 
 struct LayerParallelWorkerResult {
     priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst> top_candidates;
@@ -1013,13 +1099,15 @@ PathResult beam_search(
     const ProgressContext& progress = {},
     ofstream* depth_progress_csv = nullptr,
     ofstream* candidate_trace_csv = nullptr,
+    ofstream* cuda_timing_csv = nullptr,
     CandidateTraceMode trace_mode = CandidateTraceMode::None,
     BeamVisitedMode visited_mode = BeamVisitedMode::ExactPacked,
     int worker_threads,
     int layer_pool_width,
     int layer_visited_window,
     int layer_plateau_limit,
-    double layer_perturbation_ratio
+    double layer_perturbation_ratio,
+    BeamCandidateBackend candidate_backend
 ) {
     auto t0 = Clock::now();
     int n = static_cast<int>(init.size());
@@ -1075,7 +1163,10 @@ PathResult beam_search(
     };
 
     long long candidate_order = 0;
+    bool cuda_recent_cache_ready = false;
+    size_t cuda_recent_table_slots = 0;
     for (int depth = 1; depth <= max_depth; ++depth) {
+        auto layer_wall_start = Clock::now();
         print_progress_line(progress, "beam_depth", depth, max_depth, expanded);
 
         priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst> top_candidates;
@@ -1091,13 +1182,167 @@ PathResult beam_search(
             candidate_keep_limit = static_cast<int>(max(static_cast<long long>(beam_width), widened_limit));
         }
         long long layer_candidates = 0;
+        bool use_cuda_layer =
+            layer_only_visited &&
+            trace_mode == CandidateTraceMode::None &&
+            candidate_backend != BeamCandidateBackend::Cpu &&
+            !beam.empty();
+        bool generated_by_cuda = false;
+        bool cuda_timing_available = false;
+        CudaLayerTiming cuda_timing;
+        vector<BeamCandidate> cuda_sorted_candidates;
         bool use_parallel_layer =
             layer_only_visited &&
             trace_mode == CandidateTraceMode::None &&
             worker_threads > 1 &&
-            beam.size() > 1;
+            beam.size() > 1 &&
+            !use_cuda_layer;
 
-        if (use_parallel_layer) {
+        if (use_cuda_layer) {
+            auto outer_parent_prepare_start = Clock::now();
+            vector<CudaLayerParent> cuda_parents;
+            cuda_parents.reserve(beam.size());
+            for (const BeamItem& item : beam) {
+                CudaLayerParent parent;
+                parent.state = item.state;
+                parent.last_edge = item.last_edge;
+                parent.path_node = item.path_node;
+                parent.fingerprint = item.fingerprint;
+                parent.total_dist = total_distance(item.state);
+                parent.misplaced = misplaced_count(item.state);
+                parent.distance_hist = distance_histogram(item.state);
+                cuda_parents.push_back(move(parent));
+            }
+            double outer_parent_prepare_sec = chrono::duration<double>(
+                Clock::now() - outer_parent_prepare_start
+            ).count();
+
+            size_t recent_fingerprint_count = recent_visited.unique_size();
+            size_t needed_recent_slots = cuda_recent_slot_count(recent_fingerprint_count);
+            bool force_recent_rebuild =
+                recent_fingerprint_count > 0 &&
+                (!cuda_recent_cache_ready ||
+                 recent_visited.last_add_evicted() ||
+                 needed_recent_slots > cuda_recent_table_slots);
+            auto outer_recent_snapshot_start = Clock::now();
+            vector<Fingerprint128> recent_fingerprints;
+            if (force_recent_rebuild) {
+                recent_fingerprints = recent_visited.fingerprints();
+            }
+            double outer_recent_snapshot_sec = chrono::duration<double>(
+                Clock::now() - outer_recent_snapshot_start
+            ).count();
+
+            auto outer_cuda_call_start = Clock::now();
+            CudaLayerGenerationResult cuda_result = generate_layer_only_candidates_cuda(
+                cuda_parents,
+                es,
+                n,
+                depth,
+                candidate_keep_limit,
+                candidate_order,
+                recent_fingerprints,
+                recent_fingerprint_count,
+                recent_visited.version(),
+                recent_visited.last_added(),
+                recent_visited.last_add_evicted(),
+                force_recent_rebuild,
+                use_packed_tie_key
+            );
+            double outer_cuda_call_sec = chrono::duration<double>(
+                Clock::now() - outer_cuda_call_start
+            ).count();
+
+            if (!cuda_result.used_cuda) {
+                if (candidate_backend == BeamCandidateBackend::Cuda) {
+                    throw runtime_error("CUDA candidate backend unavailable: " + cuda_result.fallback_reason);
+                }
+                use_cuda_layer = false;
+                use_parallel_layer =
+                    layer_only_visited &&
+                    trace_mode == CandidateTraceMode::None &&
+                    worker_threads > 1 &&
+                    beam.size() > 1;
+            } else {
+                generated_by_cuda = true;
+                cuda_timing_available = true;
+                cuda_timing = cuda_result.timing;
+                cuda_timing.outer_parent_prepare_sec = outer_parent_prepare_sec;
+                cuda_timing.outer_recent_snapshot_sec = outer_recent_snapshot_sec;
+                cuda_timing.outer_cuda_call_sec = outer_cuda_call_sec;
+                cuda_recent_cache_ready = true;
+                cuda_recent_table_slots = needed_recent_slots;
+                long long layer_order_span =
+                    static_cast<long long>(beam.size()) *
+                    static_cast<long long>(es.size());
+                layer_candidates = cuda_result.layer_candidates;
+                expanded += layer_candidates;
+                candidate_order += layer_order_span;
+
+                auto outer_candidate_convert_start = Clock::now();
+                cuda_sorted_candidates.reserve(cuda_result.candidates.size());
+                for (const CudaLayerCandidate& cuda_candidate : cuda_result.candidates) {
+                    BeamCandidate candidate;
+                    candidate.total_dist = cuda_candidate.total_dist;
+                    candidate.misplaced = cuda_candidate.misplaced;
+                    candidate.max_dist = cuda_candidate.max_dist;
+                    candidate.depth = depth;
+                    candidate.edge_id = cuda_candidate.edge_id;
+                    candidate.parent_path_node = cuda_candidate.parent_path_node;
+                    candidate.fingerprint = cuda_candidate.fingerprint;
+                    candidate.order = cuda_candidate.order;
+                    candidate.parent_beam_index = cuda_candidate.parent_index;
+                    cuda_sorted_candidates.push_back(move(candidate));
+                }
+                cuda_timing.outer_candidate_convert_sec = chrono::duration<double>(
+                    Clock::now() - outer_candidate_convert_start
+                ).count();
+
+                if (cuda_result.solved && !cuda_sorted_candidates.empty()) {
+                    sort(cuda_sorted_candidates.begin(), cuda_sorted_candidates.end(), candidate_better);
+                    vector<BeamCandidate> solved_selected = {cuda_sorted_candidates.front()};
+                    const BeamCandidate& solved = solved_selected.front();
+                    const Edge& solved_edge = es[static_cast<size_t>(solved.edge_id)];
+                    auto t1 = Clock::now();
+                    double elapsed = chrono::duration<double>(t1 - t0).count();
+                    size_t reached_count = reached_state_count();
+                    auto progress_write_start = Clock::now();
+                    write_beam_depth_progress(
+                        depth_progress_csv,
+                        progress,
+                        depth,
+                        max_depth,
+                        expanded,
+                        layer_candidates,
+                        1,
+                        solved_selected,
+                        elapsed
+                    );
+                    if (cuda_timing_available) {
+                        cuda_timing.outer_progress_write_sec += chrono::duration<double>(
+                            Clock::now() - progress_write_start
+                        ).count();
+                        cuda_timing.outer_layer_sec = chrono::duration<double>(
+                            Clock::now() - layer_wall_start
+                        ).count();
+                        write_cuda_timing(cuda_timing_csv, progress, depth, cuda_timing);
+                    }
+
+                    vector<BeamItem>().swap(beam);
+                    unordered_set<PackedStateKey, PackedStateKeyHash>().swap(exact_seen);
+                    unordered_set<Fingerprint128, Fingerprint128Hash>().swap(fingerprint_seen);
+
+                    vector<SwapStep> next_path;
+                    if (record_path) {
+                        next_path = reconstruct_beam_path(path_store, solved.parent_path_node);
+                        next_path.push_back({solved_edge.u, solved_edge.v});
+                    }
+                    return {depth, expanded, reached_count, elapsed, "solved", next_path};
+                }
+            }
+        }
+
+        if (!generated_by_cuda && use_parallel_layer) {
             long long layer_order_span =
                 static_cast<long long>(beam.size()) *
                 static_cast<long long>(es.size());
@@ -1148,7 +1393,7 @@ PathResult beam_search(
                 }
                 return {depth, expanded, reached_count, elapsed, "solved", next_path};
             }
-        } else {
+        } else if (!generated_by_cuda) {
         for (const auto& item : beam) {
             for (int eid = 0; eid < static_cast<int>(es.size()); ++eid) {
                 if (eid == item.last_edge) {
@@ -1291,7 +1536,9 @@ PathResult beam_search(
         }
         }
 
-        if (top_candidates.empty()) {
+        bool no_candidates = generated_by_cuda ? cuda_sorted_candidates.empty() : top_candidates.empty();
+        if (no_candidates) {
+            auto progress_write_start = Clock::now();
             write_beam_depth_progress(
                 depth_progress_csv,
                 progress,
@@ -1303,17 +1550,31 @@ PathResult beam_search(
                 {},
                 chrono::duration<double>(Clock::now() - t0).count()
             );
+            if (cuda_timing_available) {
+                cuda_timing.outer_progress_write_sec += chrono::duration<double>(
+                    Clock::now() - progress_write_start
+                ).count();
+                cuda_timing.outer_layer_sec = chrono::duration<double>(
+                    Clock::now() - layer_wall_start
+                ).count();
+                write_cuda_timing(cuda_timing_csv, progress, depth, cuda_timing);
+            }
             break;
         }
 
         vector<BeamCandidate> selected;
-        selected.reserve(top_candidates.size());
-        while (!top_candidates.empty()) {
-            selected.push_back(top_candidates.top());
-            top_candidates.pop();
+        if (generated_by_cuda) {
+            selected = move(cuda_sorted_candidates);
+        } else {
+            selected.reserve(top_candidates.size());
+            while (!top_candidates.empty()) {
+                selected.push_back(top_candidates.top());
+                top_candidates.pop();
+            }
+            sort(selected.begin(), selected.end(), candidate_better);
         }
 
-        sort(selected.begin(), selected.end(), candidate_better);
+        auto retained_select_start = Clock::now();
         if (layer_only_visited) {
             selected = select_layer_only_retained(
                 selected,
@@ -1321,6 +1582,11 @@ PathResult beam_search(
                 layer_perturbation_ratio,
                 depth
             );
+        }
+        if (cuda_timing_available) {
+            cuda_timing.retained_select_sec += chrono::duration<double>(
+                Clock::now() - retained_select_start
+            ).count();
         }
 
         bool plateau_reached = false;
@@ -1362,6 +1628,7 @@ PathResult beam_search(
             candidate_trace_csv->flush();
         }
 
+        auto progress_write_start = Clock::now();
         write_beam_depth_progress(
             depth_progress_csv,
             progress,
@@ -1373,10 +1640,22 @@ PathResult beam_search(
             selected,
             chrono::duration<double>(Clock::now() - t0).count()
         );
+        if (cuda_timing_available) {
+            cuda_timing.outer_progress_write_sec += chrono::duration<double>(
+                Clock::now() - progress_write_start
+            ).count();
+        }
 
         if (plateau_reached) {
             size_t reached_count = reached_state_count();
             double elapsed = chrono::duration<double>(Clock::now() - t0).count();
+            if (cuda_timing_available) {
+                cuda_timing.total_sec += cuda_timing.retained_select_sec;
+                cuda_timing.outer_layer_sec = chrono::duration<double>(
+                    Clock::now() - layer_wall_start
+                ).count();
+                write_cuda_timing(cuda_timing_csv, progress, depth, cuda_timing);
+            }
             priority_queue<BeamCandidate, vector<BeamCandidate>, BeamWorstFirst>().swap(top_candidates);
             vector<BeamCandidate>().swap(selected);
             vector<int>().swap(selected_path_nodes);
@@ -1387,24 +1666,52 @@ PathResult beam_search(
         }
 
         if (layer_only_visited) {
+            auto recent_add_start = Clock::now();
             vector<Fingerprint128> retained_fingerprints;
             retained_fingerprints.reserve(selected.size());
             for (const BeamCandidate& candidate : selected) {
                 retained_fingerprints.push_back(candidate.fingerprint);
             }
             recent_visited.add_layer(move(retained_fingerprints));
+            if (cuda_timing_available) {
+                cuda_timing.outer_recent_add_sec += chrono::duration<double>(
+                    Clock::now() - recent_add_start
+                ).count();
+            }
         }
 
         int keep = static_cast<int>(selected.size());
-        beam.clear();
-        beam.reserve(keep);
+        vector<BeamItem> old_beam = move(beam);
+        auto materialize_start = Clock::now();
+        vector<BeamItem> next_beam;
+        next_beam.reserve(keep);
         for (int i = 0; i < keep; ++i) {
-            beam.push_back({
-                move(selected[i].state),
+            State next_state;
+            if (selected[i].state.empty() && selected[i].parent_beam_index >= 0) {
+                const BeamItem& parent = old_beam[static_cast<size_t>(selected[i].parent_beam_index)];
+                next_state = parent.state;
+                const Edge& edge = es[static_cast<size_t>(selected[i].edge_id)];
+                swap(next_state[edge.u], next_state[edge.v]);
+            } else {
+                next_state = move(selected[i].state);
+            }
+            next_beam.push_back({
+                move(next_state),
                 selected[i].edge_id,
                 selected_path_nodes[i],
                 selected[i].fingerprint
             });
+        }
+        beam = move(next_beam);
+        if (cuda_timing_available) {
+            cuda_timing.materialize_sec += chrono::duration<double>(
+                Clock::now() - materialize_start
+            ).count();
+            cuda_timing.total_sec += cuda_timing.retained_select_sec + cuda_timing.materialize_sec;
+            cuda_timing.outer_layer_sec = chrono::duration<double>(
+                Clock::now() - layer_wall_start
+            ).count();
+            write_cuda_timing(cuda_timing_csv, progress, depth, cuda_timing);
         }
     }
 
@@ -2217,5 +2524,32 @@ BeamVisitedMode parse_beam_visited_mode(string value) {
     );
 }
 
+string beam_candidate_backend_name(BeamCandidateBackend backend) {
+    switch (backend) {
+        case BeamCandidateBackend::Cpu:
+            return "cpu";
+        case BeamCandidateBackend::Cuda:
+            return "cuda";
+        case BeamCandidateBackend::Auto:
+            return "auto";
+    }
+    return "unknown";
+}
+
+BeamCandidateBackend parse_beam_candidate_backend(string value) {
+    transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(tolower(ch));
+    });
+    if (value == "0" || value == "cpu") {
+        return BeamCandidateBackend::Cpu;
+    }
+    if (value == "1" || value == "cuda" || value == "gpu") {
+        return BeamCandidateBackend::Cuda;
+    }
+    if (value == "2" || value == "auto") {
+        return BeamCandidateBackend::Auto;
+    }
+    throw invalid_argument("candidate_backend must be cpu/0, cuda/1, or auto/2");
+}
 
 } // namespace qk

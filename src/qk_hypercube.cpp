@@ -1,6 +1,9 @@
 #include "qk/hypercube.h"
 
 #include <algorithm>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 using namespace std;
 
@@ -21,7 +24,11 @@ vector<Edge> edges(int dim) {
 }
 
 int hdist(int a, int b) {
+#ifdef _MSC_VER
+    return static_cast<int>(__popcnt(static_cast<unsigned>(a ^ b)));
+#else
     return __builtin_popcount(static_cast<unsigned>(a ^ b));
+#endif
 }
 
 int total_distance(const State& s) {

@@ -60,6 +60,12 @@ enum class BeamVisitedMode {
     LayerOnly = 3
 };
 
+enum class BeamCandidateBackend {
+    Cpu = 0,
+    Cuda = 1,
+    Auto = 2
+};
+
 struct ProgressContext {
     bool enabled = false;
     int case_index = 0;

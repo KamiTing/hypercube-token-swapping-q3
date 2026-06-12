@@ -5,6 +5,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(QK_ENABLE_CUDA "Enable CUDA candidate generation backend" OFF)
+if(QK_ENABLE_CUDA)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(QK_CUDA_CANDIDATE_SOURCE src/qk_cuda_candidate_generator.cu)
+else()
+    set(QK_CUDA_CANDIDATE_SOURCE src/qk_cuda_candidate_generator.cpp)
+endif()
+
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
@@ -43,6 +53,7 @@ add_executable(qk_special_cases
     src/qk_hypercube.cpp
     src/qk_io.cpp
     src/qk_search.cpp
+    ${QK_CUDA_CANDIDATE_SOURCE}
     src/qk_path_optimizer.cpp
     src/qk_batcher.cpp
     src/qk_cases.cpp
@@ -50,6 +61,16 @@ add_executable(qk_special_cases
 )
 target_include_directories(qk_special_cases PRIVATE include)
 target_link_libraries(qk_special_cases PRIVATE Threads::Threads SQLite::SQLite3)
+if(QK_ENABLE_CUDA)
+    target_compile_definitions(qk_special_cases PRIVATE QK_ENABLE_CUDA=1)
+    if(MSVC)
+        target_compile_options(qk_special_cases PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>
+        )
+    endif()
+    set_property(TARGET qk_special_cases PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+endif()
 
 add_executable(qk_optimize_path
     src/qk_common.cpp

@@ -1,5 +1,6 @@
 #include "qk/batcher.h"
 #include "qk/cases.h"
+#include "qk/cuda_candidate_generator.h"
 #include "qk/hypercube.h"
 #include "qk/io.h"
 #include "qk/path_optimizer.h"
@@ -44,7 +45,7 @@ void print_usage(const char* exe) {
          << " [path_opt_stride=0] [path_opt_word_reduce=1]"
          << " [layer_pool_width=0] [layer_visited_window=0]"
          << " [layer_restart_max_width=0] [layer_plateau_limit=0] [layer_restart_growth=2]"
-         << " [layer_perturbation_ratio=0.0]\n"
+         << " [layer_perturbation_ratio=0.0] [candidate_backend=cpu]\n"
          << "max_depth=0 uses auto depth dim * 2^dim for each Qdim.\n";
     cerr << "Use custom_cases_csv=- to select built-in cases while passing later options.\n";
     cerr << "candidate_trace_mode: 0=none, 1=retained beam only, 2=all new candidates.\n";
@@ -60,6 +61,8 @@ void print_usage(const char* exe) {
          << "with a larger beam width up to restart_max_width.\n";
     cerr << "layer_perturbation_ratio: only for layer_only; fraction of retained beam slots selected by "
          << "deterministic hash perturbation from the candidate pool instead of pure greedy ranking.\n";
+    cerr << "candidate_backend: cpu/0 uses the existing CPU generator; cuda/1 requires a CUDA build; "
+         << "auto/2 uses CUDA when supported and otherwise falls back to CPU.\n";
 }
 
 } // namespace qk
@@ -97,6 +100,7 @@ int main(int argc, char** argv) {
     int layer_plateau_limit = 0;
     int layer_restart_growth = 2;
     double layer_perturbation_ratio = 0.0;
+    BeamCandidateBackend candidate_backend = BeamCandidateBackend::Cpu;
 
     try {
         if (argc > 1) min_dim = stoi(argv[1]);
@@ -134,6 +138,7 @@ int main(int argc, char** argv) {
         if (argc > 27) layer_plateau_limit = stoi(argv[27]);
         if (argc > 28) layer_restart_growth = stoi(argv[28]);
         if (argc > 29) layer_perturbation_ratio = stod(argv[29]);
+        if (argc > 30) candidate_backend = parse_beam_candidate_backend(argv[30]);
         if (case_name_filter == "-") case_name_filter.clear();
     } catch (const exception& e) {
         cerr << "Argument parse error: " << e.what() << "\n";
@@ -190,6 +195,23 @@ int main(int argc, char** argv) {
     if (layer_perturbation_ratio < 0.0 || layer_perturbation_ratio > 1.0) {
         cerr << "layer_perturbation_ratio must be between 0.0 and 1.0.\n";
         return 2;
+    }
+    if (candidate_backend == BeamCandidateBackend::Cuda) {
+        if (!cuda_candidate_backend_available()) {
+            cerr << "candidate_backend=cuda requested, but "
+                 << cuda_candidate_backend_unavailable_reason() << "\n";
+            return 2;
+        }
+        if (min_dim <= 8) {
+            cerr << "candidate_backend=cuda currently supports Q9+ only because Q8 and below "
+                 << "need packed-key tie ordering for exact CPU parity. Use candidate_backend=auto "
+                 << "or cpu for Q8 and below.\n";
+            return 2;
+        }
+    }
+    if (candidate_backend == BeamCandidateBackend::Auto && !cuda_candidate_backend_available()) {
+        cout << "candidate_backend=auto fallback: "
+             << cuda_candidate_backend_unavailable_reason() << "\n";
     }
     if (path_opt_threads <= 0) {
         path_opt_threads = worker_threads;
@@ -266,6 +288,7 @@ int main(int argc, char** argv) {
     const filesystem::path beam_depth_csv_path = output_dir / "qk_beam_depth_progress.csv";
     const filesystem::path beam_candidate_trace_csv_path = output_dir / "qk_beam_candidate_trace.csv";
     const filesystem::path beam_disk_progress_csv_path = output_dir / "qk_beam_disk_progress.csv";
+    const filesystem::path cuda_timing_csv_path = output_dir / "qk_cuda_timing.csv";
     ofstream csv(csv_path);
     csv << "dim,n,case_name,note,total_dist,misplaced,basic_lb,strong_lb,parity,"
         << "exact_status,exact_steps,exact_expanded,exact_states,exact_sec,exact_path_valid,"
@@ -298,6 +321,17 @@ int main(int argc, char** argv) {
                            << "pending_states,disk_bytes,worker_threads,generation_sec,"
                            << "visited_sec,selection_sec\n";
 
+    ofstream cuda_timing_csv(cuda_timing_csv_path);
+    cuda_timing_csv << "case_index,total_cases,dim,case_name,depth,parent_count,edge_count,"
+                    << "logical_candidates,chunk_candidates,chunks,recent_fingerprints,"
+                    << "recent_table_slots,topk_mode,topk_tiles,topk_tile_candidates,"
+                    << "valid_candidates,host_prepare_sec,device_alloc_sec,"
+                    << "h2d_sec,recent_update_sec,kernel_sec,sort_sec,d2h_sec,cpu_merge_sec,"
+                    << "topk_select_sec,retained_select_sec,materialize_sec,total_sec,"
+                    << "outer_parent_prepare_sec,outer_recent_snapshot_sec,outer_cuda_call_sec,"
+                    << "outer_candidate_convert_sec,outer_progress_write_sec,outer_recent_add_sec,"
+                    << "outer_layer_sec\n";
+
     cout << "Qk special-case benchmark\n";
     cout << "dims=Q" << min_dim << "..Q" << max_dim
          << ", beam_width=" << beam_width
@@ -325,6 +359,7 @@ int main(int argc, char** argv) {
          << ", layer_plateau_limit=" << layer_plateau_limit
          << ", layer_restart_growth=" << layer_restart_growth
          << ", layer_perturbation_ratio=" << fixed << setprecision(3) << layer_perturbation_ratio
+         << ", candidate_backend=" << beam_candidate_backend_name(candidate_backend)
          << ", output_dir=" << output_dir.generic_string() << "\n";
     if (use_custom_cases) {
         cout << "custom_cases=" << custom_cases_path.generic_string() << "\n";
@@ -410,13 +445,15 @@ int main(int argc, char** argv) {
                         progress,
                         &beam_depth_csv,
                         &beam_candidate_trace_csv,
+                        &cuda_timing_csv,
                         candidate_trace_mode,
                         beam_visited_mode,
                         worker_threads,
                         layer_pool_width,
                         layer_visited_window,
                         layer_plateau_limit,
-                        layer_perturbation_ratio
+                        layer_perturbation_ratio,
+                        candidate_backend
                     );
 
                     string attempt_status = attempt.status;

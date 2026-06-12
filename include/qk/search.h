@@ -28,13 +28,15 @@ PathResult beam_search(
     const ProgressContext& progress,
     std::ofstream* depth_progress_csv,
     std::ofstream* candidate_trace_csv,
+    std::ofstream* cuda_timing_csv,
     CandidateTraceMode trace_mode,
     BeamVisitedMode visited_mode,
     int worker_threads = 1,
     int layer_pool_width = 0,
     int layer_visited_window = 0,
     int layer_plateau_limit = 0,
-    double layer_perturbation_ratio = 0.0
+    double layer_perturbation_ratio = 0.0,
+    BeamCandidateBackend candidate_backend = BeamCandidateBackend::Cpu
 );
 
 PathResult beam_search_disk(
@@ -57,5 +59,7 @@ PathResult beam_search_disk(
 
 std::string beam_visited_mode_name(BeamVisitedMode mode);
 BeamVisitedMode parse_beam_visited_mode(std::string value);
+std::string beam_candidate_backend_name(BeamCandidateBackend backend);
+BeamCandidateBackend parse_beam_candidate_backend(std::string value);
 
 } // namespace qk

@@ -9,6 +9,7 @@ const sourceFiles = [
   path.join(cwd, "output", "q8_case1_trim_20260605_154219", "qk_special_cases.csv"),
   path.join(cwd, "output", "q8_case2_trim_20260605_154927", "qk_special_cases.csv"),
   path.join(cwd, "output", "q9_case1_disk_bw256_20260607_113040", "qk_special_cases.csv"),
+  path.join(cwd, "output", "q9_case2_disk_bw256_path_20260609_170556", "qk_special_cases.csv"),
 ];
 
 const outputDir = path.join(cwd, "output");
@@ -83,8 +84,23 @@ function tuple(values) {
   return `(${values.join(", ")})`;
 }
 
-function routeText(pathSteps) {
-  return `Route ${pathSteps.map(([u, v]) => `(${u}, ${v})`).join(", ")}`;
+function routeChunks(pathSteps, maxChars = 28000) {
+  const pieces = pathSteps.map(([u, v]) => `(${u}, ${v})`);
+  const chunks = [];
+  let current = "Route ";
+
+  for (const piece of pieces) {
+    const next = current === "Route " ? `${current}${piece}` : `${current}, ${piece}`;
+    if (next.length > maxChars && current !== "Route ") {
+      chunks.push(current);
+      current = piece;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current && current !== "Route ") chunks.push(current);
+  return chunks.length ? chunks : ["Route"];
 }
 
 function caseNumber(name) {
@@ -144,8 +160,17 @@ function buildCaseMatrix(row) {
     throw new Error(`${row.case_name} Beam path does not replay to the identity permutation`);
   }
 
-  matrix.push([routeText(swaps), "", ""]);
-  textColors.push(["#334155", "#334155", "#334155"]);
+  const chunks = routeChunks(swaps);
+  const routeRowCount = Math.ceil(chunks.length / 3);
+  for (let i = 0; i < routeRowCount; i++) {
+    matrix.push([
+      chunks[i * 3] ?? "",
+      chunks[i * 3 + 1] ?? "",
+      chunks[i * 3 + 2] ?? "",
+    ]);
+    textColors.push(["#334155", "#334155", "#334155"]);
+  }
+
   matrix.push([
     `Steps: ${swaps.length}`,
     `Beam: ${row.beam_status} (${row.beam_steps})`,
@@ -159,10 +184,10 @@ function buildCaseMatrix(row) {
   ]);
   textColors.push(["#475569", "#475569", "#475569"]);
 
-  return { matrix, textColors };
+  return { matrix, textColors, routeRowCount };
 }
 
-function applyCaseFormatting(sheet, startCol, startRow, rows, colors, dim) {
+function applyCaseFormatting(sheet, startCol, startRow, rows, colors, dim, routeRowCount) {
   const endCol = startCol + 2;
   const endRow = startRow + rows.length - 1;
   const titleRange = sheet.getRange(rangeAddress(startCol, startRow, endCol, startRow));
@@ -195,21 +220,26 @@ function applyCaseFormatting(sheet, startCol, startRow, rows, colors, dim) {
     7: [210, 720, 720],
     8: [200, 920, 920],
     9: [200, 1040, 1040],
+    10: [200, 1220, 1220],
+    11: [200, 1440, 1440],
   };
   const [routeWidth, permWidth, outcomeWidth] = widthByDim[dim] ?? widthByDim[4];
   sheet.getRange(rangeAddress(startCol, startRow, startCol, endRow)).format.columnWidthPx = routeWidth;
   sheet.getRange(rangeAddress(startCol + 1, startRow, startCol + 1, endRow)).format.columnWidthPx = permWidth;
   sheet.getRange(rangeAddress(startCol + 2, startRow, startCol + 2, endRow)).format.columnWidthPx = outcomeWidth;
 
-  const routeRow = endRow - 2;
-  sheet.getRange(rangeAddress(startCol, routeRow, endCol, routeRow)).merge();
-  sheet.getRange(rangeAddress(startCol, routeRow, endCol, routeRow)).format = {
+  const routeStartRow = endRow - 1 - routeRowCount;
+  const routeEndRow = routeStartRow + routeRowCount - 1;
+  if (routeRowCount === 1) {
+    sheet.getRange(rangeAddress(startCol, routeStartRow, endCol, routeStartRow)).merge();
+  }
+  sheet.getRange(rangeAddress(startCol, routeStartRow, endCol, routeEndRow)).format = {
     fill: "#F8FAFC",
     font: { italic: true, color: "#334155" },
     wrapText: true,
     verticalAlignment: "top",
   };
-  sheet.getRange(rangeAddress(startCol, routeRow, startCol, routeRow)).format.rowHeightPx = 64;
+  sheet.getRange(rangeAddress(startCol, routeStartRow, startCol, routeEndRow)).format.rowHeightPx = routeRowCount === 1 ? 64 : 86;
 
   const stepsRange = sheet.getRange(rangeAddress(startCol, endRow - 1, endCol, endRow));
   stepsRange.format = {
@@ -263,11 +293,11 @@ async function main() {
     let startCol = 1;
     let maxEndRow = 1;
     for (const row of rows) {
-      const { matrix, textColors } = buildCaseMatrix(row);
+      const { matrix, textColors, routeRowCount } = buildCaseMatrix(row);
       const startRow = 1;
       const endRow = startRow + matrix.length - 1;
       sheet.getRange(rangeAddress(startCol, startRow, startCol + 2, endRow)).values = matrix;
-      applyCaseFormatting(sheet, startCol, startRow, matrix, textColors, dim);
+      applyCaseFormatting(sheet, startCol, startRow, matrix, textColors, dim, routeRowCount);
       maxEndRow = Math.max(maxEndRow, endRow);
       startCol += 4;
     }
@@ -280,7 +310,7 @@ async function main() {
       }
       sheet.getRange(rangeAddress(1, 1, Math.max(1, startCol - 2), maxEndRow)).format.font = {
         name: "Calibri",
-        size: dim >= 9 ? 7 : dim >= 8 ? 8 : dim >= 7 ? 9 : dim >= 6 ? 9 : dim >= 5 ? 10 : 11,
+        size: dim >= 10 ? 6 : dim >= 9 ? 7 : dim >= 8 ? 8 : dim >= 7 ? 9 : dim >= 6 ? 9 : dim >= 5 ? 10 : 11,
       };
     }
   }

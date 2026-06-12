@@ -1,0 +1,3 @@
+completed_case,total_cases,dim,case_name,total_dist,strong_lb,exact_status,exact_steps,exact_sec,exact_path_valid,beam_visited_mode,beam_status,beam_steps,beam_sec,beam_path_valid,optimized_status,optimized_steps,optimized_improvement,optimized_word_reductions,optimized_sec,optimized_path_valid,batcher_success,batcher_swaps,batcher_sec,batcher_path_valid,elapsed_sec
+1,2,9,"q9_case1",2304,1152,skipped,-1,0.000000,0,layer_only,solved,1578,72.976728,1,disabled,1578,0,0,0.000000,0,1,5774,0.000280,1,73.042639
+2,2,9,"q9_case2",2118,1059,skipped,-1,0.000000,0,layer_only,solved,1445,65.779736,1,disabled,1445,0,0,0.000000,0,1,5199,0.000236,1,138.885185

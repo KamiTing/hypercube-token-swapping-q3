@@ -352,11 +352,14 @@ Direct MinGW g++ build:
 ```powershell
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -Iinclude `
   src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp `
-  src\qk_search.cpp src\qk_batcher.cpp src\qk_cases.cpp `
+  src\qk_search.cpp src\qk_cuda_candidate_generator.cpp `
+  src\qk_batcher.cpp src\qk_cases.cpp `
   src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
 ```
 
 The `qk_special_cases` CMake target can also be used. CMake requires `Threads` and `SQLite3`.
+
+CUDA candidate generation is currently an optional backend and is disabled by default. CMake can build `src/qk_cuda_candidate_generator.cu` with `-DQK_ENABLE_CUDA=ON`; at runtime the final argument `candidate_backend=cpu|cuda|auto` selects the backend. `cpu` is the default. `auto` falls back to CPU when CUDA is unavailable or when Q8-and-below packed-key tie ordering is required. `cuda` currently supports only Q9+ `layer_only` runs with `candidate_trace_mode=0`. The CUDA backend now splits large layers into VRAM-sized candidate chunks, sorts each chunk on GPU, copies each chunk's top candidates back to CPU, and merges them with the same ordering comparator. This removes the old single-buffer 16M-candidate layer limit. For smoke tests or tuning, set `QK_CUDA_CHUNK_CANDIDATES` to override the logical candidates per chunk.
 
 ### Command-line arguments
 
@@ -373,6 +376,7 @@ qk_special_cases.exe
   [layer_pool_width=0] [layer_visited_window=0]
   [layer_restart_max_width=0] [layer_plateau_limit=0]
   [layer_restart_growth=2] [layer_perturbation_ratio=0.0]
+  [candidate_backend=cpu]
 ```
 
 `candidate_trace_mode`:

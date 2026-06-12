@@ -352,11 +352,14 @@ packed_key / fingerprint / order
 ```powershell
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -Iinclude `
   src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp `
-  src\qk_search.cpp src\qk_batcher.cpp src\qk_cases.cpp `
+  src\qk_search.cpp src\qk_cuda_candidate_generator.cpp `
+  src\qk_batcher.cpp src\qk_cases.cpp `
   src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
 ```
 
 或透過 CMake 建置 `qk_special_cases` target。CMake 需要 `Threads` 與 `SQLite3`。
+
+CUDA candidate generation 目前是可選 backend，預設不啟用。CMake 可用 `-DQK_ENABLE_CUDA=ON` 編進 `src/qk_cuda_candidate_generator.cu`；執行時用最後一個參數 `candidate_backend=cpu|cuda|auto` 選擇。`cpu` 是預設值，`auto` 在無 CUDA build 或不支援的 Q8 以下 case 會回到 CPU；`cuda` 目前只允許 Q9 以上的 `layer_only`、`candidate_trace_mode=0` 路徑，因為 Q8 以下仍需要 packed-key tie ordering 才能保證和 CPU 完全同序。CUDA backend 會依可用 VRAM 分 chunk 產生候選，每個 chunk 在 GPU 排序後只回傳 top candidates，再用同一排序規則合併，因此不再受舊版 16M candidates 單層 buffer 限制。測試或調參時可用環境變數 `QK_CUDA_CHUNK_CANDIDATES` 指定每個 chunk 的 logical candidate 數。
 
 ### 命令列參數
 
@@ -373,6 +376,7 @@ qk_special_cases.exe
   [layer_pool_width=0] [layer_visited_window=0]
   [layer_restart_max_width=0] [layer_plateau_limit=0]
   [layer_restart_growth=2] [layer_perturbation_ratio=0.0]
+  [candidate_backend=cpu]
 ```
 
 `candidate_trace_mode`：
