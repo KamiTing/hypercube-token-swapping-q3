@@ -102,6 +102,10 @@ Beam is heuristic and does not guarantee optimal paths. Official routes are acce
 
 Current high-dimensional CUDA runs use `layer_only`. It avoids SQLite visited databases, keeps `qk_beam_candidate_trace.csv` at 0 bytes for official large runs, and reconstructs the full path from parent back-pointers after a solution is found.
 
+### Perturbation Setting
+
+`layer_perturbation_ratio` only affects retained selection in `layer_only` Beam. With `0.10`, about 10% of retained slots are selected from the candidate pool by a deterministic hash perturbation instead of pure greedy score; with `0.15`, that share rises to about 15%. This is not random search: the same input and parameters remain reproducible. The Q4-Q11 official all-run uses `0.10`, while Q12 case1 uses `0.15`, mainly to keep more non-local-best directions alive near high-dimensional tail plateaus.
+
 ## CUDA Backend
 
 The CUDA backend accelerates the `layer_only` Beam candidate stage. It is not a separate solver.

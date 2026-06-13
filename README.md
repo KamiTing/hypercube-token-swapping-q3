@@ -121,6 +121,10 @@ CLI 參數 `beam_visited_mode` 目前支援四種模式：
 - `layer_pool_width` 控制每層先保留的 candidate pool，再降到 `beam_width`。
 - `layer_perturbation_ratio` 用 deterministic perturbation 保留一部分非 greedy 候選，降低 tail 階段卡在 local best 的機率。
 
+### 擾動設定
+
+`layer_perturbation_ratio` 只影響 `layer_only` Beam 的 retained selection。比例為 `0.10` 時，約 10% retained slots 會從 candidate pool 中依 deterministic hash 擾動挑選，而不是完全依 greedy score；比例為 `0.15` 時則提高到約 15%。這不是隨機搜尋，同一組輸入與參數仍會產生可重現結果。Q4-Q11 官方 all-run 使用 `0.10`，Q12 case1 使用 `0.15`，目的是在高維 tail 階段保留更多非局部最佳方向，降低卡在 local best 的機率。
+
 ## CUDA Backend
 
 CUDA backend 是 `layer_only` Beam 的候選產生加速器，不是獨立 solver。
