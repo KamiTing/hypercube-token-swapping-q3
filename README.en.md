@@ -1,323 +1,84 @@
-﻿# Q3-Q10 Hypercube Token Swapping
+﻿# Qk Special-Case Hypercube Token Swapping
 
-This project implements and validates zero-buffer token swapping on hypercubes, including:
+This branch is the working branch for Qk hypercube special-case token swapping. It focuses on Q4+ fixed permutations, Beam Search, CUDA candidate generation, route validation, and preserved result artifacts. It is no longer the main branch for Q4 random benchmarking.
 
-- **Minimum Token Swapping on Q3 Hypercube**
-- **Zero-buffer edge-swap routing shortest path**
-- **Q4 full-random benchmark**
-- **Q4-Q10 special-case Beam Search**
+Current branch roles:
 
-On a 3-dimensional hypercube `Q3` (8 nodes), each step can only swap the two tokens on a legal edge. The goal is to transform any initial permutation into `(0,1,2,3,4,5,6,7)` with the minimum number of swaps.
+- `codex/sp`: special-case / CUDA Beam branch described here.
+- `codex/q4-random-test`: dedicated Q4 full-random benchmark branch.
+
+## Current Status
+
+As of `2026-06-13`:
+
+| Scope | Status | Main source |
+|---|---|---|
+| Q4 custom cases | 24/24 solved | `output/q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055/` |
+| Q5-Q11 special cases | 2/2 solved for each dimension | same source |
+| Q12 | `q12_case1` solved; `q12_case2` is not an official completed result yet | `output/q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_20260613_132118/` |
+| Q13-Q14 | cases are present but unsolved in official artifacts | `custom_qk_cases.csv` |
+| Q15 | one case is present but unsolved in official artifacts | `custom_qk_cases.csv` |
+| Route workbook | Q4-Q12 sheets exist; Q12 currently contains `q12_case1` only | `output/qk_special_cases_routes.xlsx` |
+
+`custom_qk_cases.csv` currently contains 24 Q4 cases, 2 cases for each Q5-Q14 dimension, and 1 Q15 case. The preserved artifact list and cleanup rules are tracked in [QK_RESULTS_INDEX.md](QK_RESULTS_INDEX.md).
 
 ## Problem Model
 
-- Nodes: `0..7`, represented by 3-bit binary labels.
-- Edges: two nodes are connected iff their labels differ in exactly 1 bit.
-- State representation: `state[node] = token`.
-- Operation: each move swaps tokens on one hypercube edge.
+For `Qd` hypercube token swapping:
 
-This is a zero-buffer routing model: no extra buffers, no token stacking.
+- Node count: `N = 2^d`
+- Nodes: `0..N-1`
+- Legal edge: two node labels differ in exactly one bit
+- State: `state[node] = token`
+- Goal: identity permutation, `state[i] = i`
+- Move: swap two tokens along one hypercube edge
 
-## Methods
+This is a zero-buffer model: no extra holding nodes and no token stacking.
 
-- **BFS**: exact shortest-path true table
-- **A\***: exact search with admissible heuristic
-- **Beam Search**: heuristic search
-- **Batcher baseline**: fixed compare-exchange sorting network
+## Module Layout
 
-A\* heuristic:
+| Module | Responsibility |
+|---|---|
+| `qk_common` | state types, swap steps, fingerprints, packed keys |
+| `qk_hypercube` | edges, distances, lower bounds, path replay validation |
+| `qk_search` | Strong A*, Beam Search, disk visited, layer-only visited, path back-pointers |
+| `qk_cuda_candidate_generator` | CUDA candidate generation, CUB Top-K, GPU diverse preselection |
+| `qk_batcher` | deterministic Batcher baseline |
+| `qk_cases` | built-in cases and `custom_qk_cases.csv` parsing |
+| `qk_io` | CSV escaping, progress output, path formatting |
+| `qk_path_optimizer` | retained path post-processing tool; disabled in official results |
+| `qk_special_cases.cpp` | CLI runner and CSV output orchestration |
 
-`h(state) = ceil(total_hamming_distance(state) / 2)`
+Older Q3 and Q4 random benchmark code remains in the repository for reference, but it is not the center of this branch.
 
-One swap can reduce the total Hamming distance by at most 2, so this heuristic does not overestimate.
+## Lower Bound
 
-## Beam Search Design Details
-
-### Core Idea
-
-A greedy search keeps only one path per step and can be trapped by local choices.  
-Beam Search keeps multiple high-potential paths at each depth: after expansion, only the top `beam_width` states are retained.
-
-Current project setting:
-
-- `BEAM_WIDTH = 14`
-- `MAX_DEPTH = 12`
-
-### Candidate State Contents
-
-Each `BeamItem` stores:
-
-- `state`: current permutation
-- `depth`: number of swaps used so far
-- `last_edge_id`: previously used edge (to avoid immediate undo)
-- `used_edges`: per-edge usage counts (for repeat-edge penalty)
-
-### Layer Expansion
-
-For each state in the current beam, all legal hypercube edge swaps are tried:
-
-`next_state = swap_nodes(state, e.u, e.v)`
-
-Q3 has 12 edges, so each state can generate up to 12 candidates per layer (before pruning).
-
-### Deduplication and Pruning
-
-`visited_best_depth[state]` stores the earliest depth at which a state was reached. If a state is revisited at an equal or greater depth, it is skipped.
-
-Also, `last_edge_id` prevents immediate reversal on the same edge.
-
-### Scoring Function (Tie-Break Order)
-
-Candidates are ranked by `BeamScore` in tuple-like ascending order (smaller is better):
-
-1. `total_dist`: total Hamming distance to target
-2. `misplaced`: number of misplaced tokens
-3. `max_dist`: max single-token distance to target
-4. `repeat_penalty`: penalty for repeated edge usage
-5. `-improvement`: global distance reduction by this swap
-6. `-local_improvement`: local improvement on swapped pair
-7. `-dir_score`: directional preference (hot correction bit)
-8. `-touched_max_dist`: prioritize touching farther tokens
-9. `depth`: prefer shallower path in full tie
-
-### Termination Conditions
-
-- Initial state is target: return `0`
-- Target found during candidate generation: return current `depth`
-- Depth reaches `MAX_DEPTH`: stop and return failure (`-1`)
-
-### Positioning
-
-Beam Search is heuristic and is not theoretically guaranteed to be optimal in general. However, on Q3 full-permutation testing (40320 states), this implementation and parameter set matches the BFS true table exactly.
-
-## Experiment Scope
-
-- Full permutation test: `8! = 40320` states.
-- For every initial state, compute the distance to target and compare methods.
-
-## Recommended Parameters
-
-Based on full-state parameter sweeps for the current implementation:
-
-- `BEAM_WIDTH = 14`
-- `MAX_DEPTH = 12`
-
-This configuration keeps Beam Search fully optimal on Q3 while being much faster than loose settings (e.g., 100/30).
-
-## Project Structure
+The reported `strong_lb` is:
 
 ```text
-.
-├── include/
-│   ├── config.h
-│   ├── hypercube.h
-│   ├── search.h
-│   ├── batcher.h
-│   ├── report.h
-│   └── qk/
-│       ├── common.h
-│       ├── hypercube.h
-│       ├── search.h
-│       ├── batcher.h
-│       ├── cases.h
-│       └── io.h
-├── src/
-│   ├── main.cpp
-│   ├── hypercube.cpp
-│   ├── search.cpp
-│   ├── batcher.cpp
-│   ├── report.cpp
-│   ├── qk_common.cpp
-│   ├── qk_hypercube.cpp
-│   ├── qk_search.cpp
-│   ├── qk_batcher.cpp
-│   ├── qk_cases.cpp
-│   ├── qk_io.cpp
-│   └── qk_special_cases.cpp
-├── output/
-│   ├── q4_path_selected_10000_basic_no_path_20260604_205233/
-│   ├── qk_custom_cases_20260605_133247/
-│   ├── q8_case1_trim_20260605_154219/
-│   ├── q8_case2_trim_20260605_154927/
-│   ├── q9_case1_disk_bw256_20260607_113040/
-│   ├── q9_case2_disk_bw256_path_20260609_170556/
-│   └── qk_special_cases_routes.xlsx
-├── tools/
-│   └── build_qk_special_cases_workbook.mjs
-├── custom_qk_cases.csv
-├── Q9_BEAM_SEARCH_EVOLUTION.md
-├── legacy/
-│   └── hypercube_test.cpp
-├── plot_distribution.py
-└── CMakeLists.txt
+basic_lb = ceil(total_hamming_distance / 2)
+max_packet_distance = max token-to-target Hamming distance
+cycle_lower_bound = N - number_of_cycles
+strong_lb = parity_adjust(max(basic_lb, max_packet_distance, cycle_lower_bound))
 ```
 
-## Build and Run
+`parity_adjust` makes the lower bound match the permutation parity. This is a lower bound, not an expected Beam path length; Q12 still sits far above the bound, so the search strategy still has room to improve.
 
-### 1) Compile the C++ program (MinGW g++)
+## Search Modes
 
-```powershell
-g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/batcher.cpp src/report.cpp -Iinclude -o hypercube_refactor.exe
-```
+### Strong A*
 
-### 2) Run the full experiment
+`astar_exact()` uses `strong_lb` as an admissible heuristic and is useful for small dimensions. Official special-case runs mostly skip exact search above Q4.
 
-```powershell
-.\hypercube_refactor.exe
-```
+### Batcher Baseline
 
-Outputs will be written to `output/`:
+`batcher_baseline()` is a deterministic compare-exchange route. It is stable and valid, but usually much longer than Beam.
 
-- `output/hypercube_report.txt`
-- `output/step_distribution.csv`
+### Beam Search
 
-### 3) Generate summary table and plots
+Beam is the current main solver. Each layer expands retained states over all hypercube edges, scores candidates, and keeps a bounded set for the next layer.
 
-```powershell
-.\.venv\Scripts\python.exe plot_distribution.py
-```
-
-This generates:
-
-- `output/step_distribution_summary.csv`
-- `output/bfs_step_distribution.png`
-- `output/method_step_distribution_compare.png`
-
-## Key Results (Q3 Full Test)
-
-- A\* matches BFS on all states (40320/40320).
-- Beam Search (14/12) matches BFS on all states (40320/40320).
-- Batcher baseline is always solvable but rarely optimal (~`1.87%`).
-
-## Q4 Full-Random Benchmark
-
-Each Q4 (`DIM=4`) full-random case is sampled uniformly from all `16!` token placements with a Fisher-Yates shuffle, rather than generated by a random walk from the target state.
-
-- Benchmark program: `src/q4_random_benchmark.cpp`
-- Visualization script: `plot_q4_random.py`
-- Compared methods: Basic A*, Strong A*, Beam Search, and Batcher's baseline
-
-Basic A* heuristic:
-
-`h_basic = ceil(total_hamming_distance / 2)`
-
-Strong A* heuristic:
-
-`h_strong = parity_adjust(max(ceil(total_hamming_distance / 2), max_packet_distance, cycle_lower_bound))`
-
-Here `cycle_lower_bound = N - number_of_cycles`, and `parity_adjust` moves the lower bound to the nearest value with the same parity as the current permutation.
-
-### Run Q4 benchmark
-
-```powershell
-g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
-.\q4_random_benchmark_run.exe 10000 128 30 42 0 1 1 output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
-```
-
-Argument order:
-
-- `samples beam_width max_depth seed astar_cap parallel_methods record_paths [output_dir]`
-- `astar_cap = 0` means no visited-state cap for A*
-- `parallel_methods = 1` runs the four methods for each case concurrently
-- `record_paths = 1` writes detailed routing paths; use `0` for large runs if memory usage matters
-- To avoid excessive memory use on hard Q4 cases, Basic A* does not write a path; `astar_path` is left empty while `astar_steps`, expanded nodes, and runtime are still recorded. Strong A*, Beam, and Batcher write full paths.
-- `output_dir` is optional and defaults to `output`. For path-enabled runs, use a separate directory to avoid overwriting an existing large benchmark.
-
-### Generate Q4 visualizations
-
-```powershell
-.\.venv\Scripts\python.exe plot_q4_random.py output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
-```
-
-### Q4 output files
-
-- `output_dir/q4_random_benchmark.csv`
-- `output_dir/q4_random_routing_paths.csv`
-- `output_dir/q4_random_summary.csv`
-- `output_dir/q4_steps_hist_compare.png`
-- `output_dir/q4_time_boxplot.png`
-- `output_dir/q4_gap_vs_batcher_hist.png`
-
-`q4_random_routing_paths.csv` records detailed routing paths for every selected permutation. Each row includes the initial state and Basic A*/Strong A*/Beam/Batcher step counts. Basic A* leaves `astar_path` empty; Strong A*, Beam, and Batcher write the actual edge-swap sequence. Because Q4 nodes include `10..15`, the path format uses `u-v`, for example `0-1 10-14`.
-
-### Current large run (10000 full-random samples)
-
-- Output directory: `output/q4_path_selected_10000_basic_no_path_20260604_205233`
-- `beam_width=128, max_depth=30, seed=42, astar_cap=0, parallel_methods=1, record_paths=1`
-- `elapsed = 11295s`
-- `Basic A* failures = 0/10000`
-- `Strong A* failures = 0/10000`
-- `Beam failures = 0/10000`
-- `Batcher failures = 0/10000`
-- `Basic A* and Strong A* same steps = 10000/10000`
-- `Strong A* expanded <= Basic A* = 8747/10000`
-- `Basic A* avg steps = 17.1852`
-- `Strong A* avg steps = 17.1852`
-- `Beam avg steps = 17.2270`
-- `Batcher avg swaps = 39.9200`
-- `Basic A* avg expanded = 87167.9328`
-- `Strong A* avg expanded = 4287.0348`
-- `Beam avg expanded = 48680.0116`
-- `Basic A* avg sec = 0.841673`
-- `Strong A* avg sec = 0.073471`
-- `Beam avg sec = 0.018573`
-- `Batcher avg sec = 0.000022`
-- `avg case wall sec = 1.129430`
-- Routing path verification: `astar_path` is empty for every row; Strong A*, Beam, and Batcher paths all reach the Q4 goal, and path lengths match their step/swap columns.
-
-### Result Analysis
-
-1. Strong A* preserves the same solution length as Basic A*.
-Across 10000 full-random cases, both A* variants solved all cases and matched steps on `10000/10000` samples. Since both are admissible A* searches, this run shows that the stronger heuristic reduced cost without changing the optimal result.
-
-2. The stronger heuristic greatly reduces expansion.
-Average expanded nodes dropped from `87167.9328` to `4287.0348`, about a `20.3x` expansion reduction. Average runtime dropped from `0.841673s` to `0.073471s`, about an `11.5x` improvement.
-
-3. Beam remains the fastest heuristic search.
-Beam averaged `0.018573s`, but it is a pruning-based heuristic and does not guarantee optimality. This run solved `10000/10000` cases; its average step count was `17.2270`, slightly above the Basic A*/Strong A* average of `17.1852`.
-
-4. Batcher is fastest but uses many more swaps.
-Batcher is a fixed compare-exchange network, not a search algorithm. It averaged `39.9200` swaps, about `2.32x` the Strong A* average shortest-path length.
-
-5. Method positioning.
-Basic A* and Strong A* are A* variants with admissible heuristics; Beam is a fast heuristic baseline; Batcher is a deterministic routing baseline.
-
-Note: the `astar_*` columns in CSV outputs correspond to Basic A*.
-
-## Q4-Q10 Special Cases (`codex/sp`)
-
-The SP branch adds a modular `qk` special-case runner for specified Q4-and-above permutations. Q4 can use Strong A* for exact verification. Q5 and above run only Beam Search and the Batcher baseline to avoid Basic A* state-space explosion.
-
-After the refactor, the special-case runner is split into:
-
-- `qk_common`: shared state, swap, fingerprint, and packed-key types.
-- `qk_hypercube`: hypercube edges, distances, lower bounds, and path validation.
-- `qk_search`: Strong A*, Beam Search, RAM fingerprint visited storage, SQLite disk fingerprint visited storage, and layer-only RAM Beam.
-- `qk_batcher`: Batcher baseline.
-- `qk_cases`: built-in cases, custom CSV parsing, and permutation validation.
-- `qk_io`: CSV escaping, progress display, and memory-trimming helpers.
-- `qk_special_cases.cpp`: CLI arguments, output files, and the top-level runner flow.
-
-`custom_qk_cases.csv` currently contains Q4-Q15 special cases. Q15 has one case; Q4-Q14 have two cases each. The latest large result saved into the route workbook is Q10 case1.
-
-### Beam visited modes
-
-Four visited implementations remain selectable from the command line:
-
-| Mode | Description |
-|---|---|
-| `exact` | Stores the full packed state and supports Q1-Q8 |
-| `fingerprint128` | Stores 128-bit fingerprints in RAM |
-| `fingerprint128_disk` | Stores 128-bit fingerprints in batched SQLite databases |
-| `layer_only` | Keeps only the current Beam and retained fingerprints from the previous K layers, with no global visited set |
-
-Q9 uses `fingerprint128_disk`. The Bloom filter is only a fast negative filter. Possible hits are still checked against the in-memory pending set and the SQLite primary key, so Bloom false positives do not directly discard candidates.
-
-Q10 case1 uses `layer_only`. This mode spends RAM on the recent retained-layer fingerprint window and the per-layer candidate pool. It does not create a SQLite visited database and does not record a candidate trace. Full paths are still stored through parent back-pointers in a temporary path store and reconstructed after a solution is found.
-
-### Simplified Beam ordering
-
-`qk_special_cases` currently keeps the simplified Beam ordering used by the successful Q8/Q9 runs. At each depth, candidates are retained by the following ascending keys:
+The main candidate ordering is:
 
 ```text
 total_dist
@@ -325,43 +86,67 @@ max_dist
 misplaced
 depth
 edge_id
-packed_key / fingerprint / order
+fingerprint / packed key / generation order
 ```
 
-This version no longer uses the older nine-field Beam tie-breaker, such as `repeat_penalty`, `improvement`, `local_improvement`, `dir_score`, and `touched_max_dist`. The goal is to reduce per-candidate state and path-history overhead so Q8-Q10 can run reliably with fingerprint visited storage, disk visited storage, or layer-only windows. The ordering is still a heuristic Beam policy and does not guarantee shortest paths; final correctness is checked by replaying the output path.
+Beam is heuristic and does not guarantee optimal paths. Official routes are accepted only after replay validation.
 
-### Q9/Q10 memory and parallel improvements
+## Visited Modes
 
-- Paths use parent back-pointers and are reconstructed only after a solution is found.
-- Fingerprints are updated in O(1) after a swap.
-- Total distance, misplaced count, and maximum distance are updated incrementally.
-- A full 512-token state is materialized only for candidates retained by the Beam.
-- Visited fingerprints are distributed across 16 SQLite shards.
-- 24 workers generate candidates and process sharded lookups in parallel.
-- Fixed parent/edge indices and an original-order commit pass preserve deterministic search ordering.
-- The Windows process runs at `BelowNormal` priority to preserve desktop responsiveness.
-- The final Q9 run disables candidate tracing and records only depth progress, disk progress, and the final path.
-- The Q10 RAM run uses `layer_only`, keeps retained fingerprints from the previous K layers, and uses deterministic perturbation to select a small fraction of retained candidates from the wider candidate pool.
+| Mode | Purpose |
+|---|---|
+| `exact` | stores full packed states; suitable up to Q8 |
+| `fingerprint128` | stores 128-bit fingerprints in RAM |
+| `fingerprint128_disk` | stores fingerprints in SQLite shards; used by older Q9 official runs |
+| `layer_only` | keeps only the current beam and the previous K retained fingerprint layers |
 
-See [Q9_BEAM_SEARCH_EVOLUTION.md](Q9_BEAM_SEARCH_EVOLUTION.md) for the complete design and validation record.
+Current high-dimensional CUDA runs use `layer_only`. It avoids SQLite visited databases, keeps `qk_beam_candidate_trace.csv` at 0 bytes for official large runs, and reconstructs the full path from parent back-pointers after a solution is found.
 
-### Build the special-case runner
+## CUDA Backend
 
-Direct MinGW g++ build:
+The CUDA backend accelerates the `layer_only` Beam candidate stage. It is not a separate solver.
+
+Current split:
+
+- GPU: candidate generation, score computation, recent fingerprint checks, CUB DeviceTopK preselection.
+- GPU: diverse preselection for greedy, max-distance, misplaced, edge-bit, and perturbation keys.
+- CPU: final exact comparator ordering, retained deduplication, parent path-node writes, and retained state materialization.
+
+`cuda_topk_mode` values:
+
+| Mode | Meaning |
+|---|---|
+| `cub` | recommended; CUB DeviceTopK with refined tie handling |
+| `tiled` | tile-level GPU selection followed by CPU merge |
+| `full_sort` | old full GPU sort, kept for diagnostics or fallback |
+
+`topk_mode=2` in `qk_cuda_timing.csv` is the expected CUB path. `topk_mode=0` means full sort and is undesirable for large official runs.
+
+## Build
+
+### CPU / disk mode
 
 ```powershell
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -Iinclude `
   src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp `
   src\qk_search.cpp src\qk_cuda_candidate_generator.cpp `
-  src\qk_batcher.cpp src\qk_cases.cpp `
+  src\qk_path_optimizer.cpp src\qk_batcher.cpp src\qk_cases.cpp `
   src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
 ```
 
-The `qk_special_cases` CMake target can also be used. CMake requires `Threads` and `SQLite3`.
+Use this build for CPU Beam or `fingerprint128_disk` runs.
 
-CUDA candidate generation is currently an optional backend and is disabled by default. CMake can build `src/qk_cuda_candidate_generator.cu` with `-DQK_ENABLE_CUDA=ON`; at runtime the final argument `candidate_backend=cpu|cuda|auto` selects the backend. `cpu` is the default. `auto` falls back to CPU when CUDA is unavailable or when Q8-and-below packed-key tie ordering is required. `cuda` currently supports only Q9+ `layer_only` runs with `candidate_trace_mode=0`. The CUDA backend now splits large layers into VRAM-sized candidate chunks, sorts each chunk on GPU, copies each chunk's top candidates back to CPU, and merges them with the same ordering comparator. This removes the old single-buffer 16M-candidate layer limit. For smoke tests or tuning, set `QK_CUDA_CHUNK_CANDIDATES` to override the logical candidates per chunk.
+### CUDA layer-only build
 
-### Command-line arguments
+Verified Windows direct build:
+
+```powershell
+cmd.exe /d /s /c '"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && nvcc -std=c++17 -DQK_ENABLE_CUDA=1 -Itools -Iinclude -Xcompiler "/EHsc /utf-8 /Zc:preprocessor" src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp src\qk_search.cpp src\qk_cuda_candidate_generator.cu src\qk_path_optimizer.cpp src\qk_batcher.cpp src\qk_cases.cpp src\qk_special_cases.cpp tools\sqlite3_stub.cpp -o output\qk_special_cases_cuda.exe'
+```
+
+This direct CUDA build uses `tools\sqlite3_stub.cpp`, so it is intended for `layer_only` CUDA runs, not disk visited mode.
+
+## CLI
 
 ```text
 qk_special_cases.exe
@@ -376,120 +161,140 @@ qk_special_cases.exe
   [layer_pool_width=0] [layer_visited_window=0]
   [layer_restart_max_width=0] [layer_plateau_limit=0]
   [layer_restart_growth=2] [layer_perturbation_ratio=0.0]
-  [candidate_backend=cpu]
+  [candidate_backend=cpu] [beam_selection_policy=greedy] [cuda_topk_mode=cub]
 ```
 
-`candidate_trace_mode`:
+Useful settings:
 
-- `0`: no candidate trace
-- `1`: retained Beam candidates only
-- `2`: all new candidates
+- `candidate_trace_mode=0`: large official runs.
+- `case_name_filter=-`: no case filter.
+- `exact_max_dim=0`: skip Strong A* entirely.
+- `candidate_backend=cuda`: require CUDA support.
+- `beam_selection_policy=diverse`: retain a more diverse beam.
 
-### Final Q9 commands
+## Official Run Examples
 
-```powershell
-.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
-  output\q9_case1_disk_bw256_20260607_113040 `
-  .\custom_qk_cases.csv 0 q9_case1 `
-  fingerprint128_disk 24 1024 1000000 16
-
-.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
-  output\q9_case2_disk_bw256_path_20260609_170556 `
-  .\custom_qk_cases.csv 0 q9_case2 `
-  fingerprint128_disk 24 1024 1000000 16
-```
-
-### Q10 case1 layer-only RAM command
-
-Q10 case1 uses `beam_width=512`, `layer_pool_width=4096`, `layer_visited_window=4096`, `layer_restart_max_width=512`, `layer_plateau_limit=512`, and `layer_perturbation_ratio=0.10`. This run does not use a SQLite visited database, and `qk_beam_candidate_trace.csv` remains 0 bytes.
+### Q4-Q11 CUDA all-run
 
 ```powershell
-.\qk_special_cases.exe 10 10 512 0 0 2000000 30 `
-  output\q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936 `
-  .\custom_qk_cases.csv 0 q10_case1 `
+.\output\qk_special_cases_cuda.exe 4 11 512 0 0 2000000 30 `
+  output\q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_YYYYMMDD_HHMMSS `
+  .\custom_qk_cases.csv 0 - `
   layer_only 24 1024 1000000 16 `
   0 1 200000 0.25 24 0 1 `
-  4096 4096 512 512 2 0.10
+  65536 65536 2048 2048 2 0.10 cuda diverse cub
 ```
 
-### Special-case results
+### Q12 case1 CUDA run
 
-Every Beam and Batcher path below passed hypercube-edge replay validation:
+```powershell
+.\output\qk_special_cases_cuda.exe 12 12 1024 1000000 0 2000000 30 `
+  output\q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_YYYYMMDD_HHMMSS `
+  .\custom_qk_cases.csv 0 q12_case1 `
+  layer_only 24 1024 1000000 16 `
+  0 1 200000 0.25 24 0 1 `
+  262144 65536 4096 1536 2 0.15 cuda diverse cub
+```
 
-| Dimension | Case | Strong LB | Beam steps | Expanded | Beam sec | Batcher swaps |
-|---|---|---:|---:|---:|---:|---:|
-| Q5 | case1 | 40 | 42 | 738,848 | 0.592 | 124 |
-| Q5 | case2 | 40 | 44 | 765,473 | 0.698 | 108 |
-| Q6 | case1 | 96 | 106 | 4,790,899 | 6.669 | 344 |
-| Q6 | case2 | 84 | 92 | 4,200,618 | 5.561 | 318 |
-| Q7 | case1 | 224 | 254 | 27,793,523 | 50.056 | 906 |
-| Q7 | case2 | 196 | 240 | 26,463,332 | 49.953 | 808 |
-| Q8 | case1 | 512 | 686 | 88,551,994 | 207.723 | 2318 |
-| Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
-| Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
-| Q9 | case2 | 1059 | 1563 | 914,621,697 | 10,559.491 | 5199 |
-| Q10 | case1 | 2560 | 3308 | 8,663,587,275 | 2,660.163 | 13,998 |
+The preserved Q12 directory contains only official completion for `q12_case1`. A watchdog stopped the run before `q12_case2` could become an official result.
 
-Q9 case1:
+## Official Result Summary
 
-- Beam width: `256`
-- Solution depth: `1558`
-- Visited states: `909,749,195`
-- Runtime: about `3 hours 58 minutes 28 seconds`
-- Peak RAM: about `1.56 GB`
-- SQLite visited size at completion: about `19.75 GB`
-- Beam uses about `73.0%` fewer swaps than Batcher
-- `beam_path_valid=1`
+### Q4-Q11 CUDA all-run
 
-The SQLite visited shards were deleted after completion to reclaim disk space. The final path, per-depth progress, and result CSV remain available.
+Source:
 
-Q9 case2:
+```text
+output/q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055/
+```
 
-- Beam width: `256`
-- Solution depth: `1563`
-- Visited states: `914,621,698`
-- Runtime: about `2 hours 56 minutes 0 seconds`
-- SQLite visited size at completion: about `21.32 GB` (`19.86 GiB`)
-- Beam uses about `69.9%` fewer swaps than Batcher
-- `beam_path_valid=1`
+| Dimension | Cases solved | Beam step range | Total expanded | Total Beam sec | Valid paths |
+|---|---:|---:|---:|---:|---:|
+| Q4 | 24/24 | 6-21 | 4,616,321 | 4.061 | 24/24 |
+| Q5 | 2/2 | 40-44 | 3,205,037 | 2.607 | 2/2 |
+| Q6 | 2/2 | 94-110 | 19,547,494 | 14.315 | 2/2 |
+| Q7 | 2/2 | 244-268 | 116,436,146 | 38.269 | 2/2 |
+| Q8 | 2/2 | 556-634 | 621,749,910 | 98.801 | 2/2 |
+| Q9 | 2/2 | 1351-1464 | 3,315,878,036 | 265.926 | 2/2 |
+| Q10 | 2/2 | 3019-3350 | 16,685,211,272 | 605.560 | 2/2 |
+| Q11 | 2/2 | 6845-8048 | 85,866,033,678 | 1431.354 | 2/2 |
 
-Q10 case1:
+### Important Q8-Q12 cases
 
-- Beam mode: `layer_only`
-- Beam width: `512`
-- Layer pool width: `4096`
-- Layer visited window: `4096`
-- Perturbation ratio: `0.10`
-- Solution depth: `3308`
-- Visited states: `8,663,587,276`
-- Runtime: about `44 minutes 20 seconds`
-- Peak RAM: monitored under about `1 GB` in this run
-- Beam uses about `76.4%` fewer swaps than Batcher
-- `beam_path_valid=1`
+| Case | Strong LB | Beam steps | Expanded | Beam sec | Batcher swaps | Path valid |
+|---|---:|---:|---:|---:|---:|---:|
+| q8_case1 | 512 | 634 | 331,291,728 | 52.381 | 2,318 | yes |
+| q8_case2 | 438 | 556 | 290,458,182 | 46.419 | 2,102 | yes |
+| q9_case1 | 1152 | 1464 | 1,724,512,530 | 137.966 | 5,774 | yes |
+| q9_case2 | 1059 | 1351 | 1,591,365,506 | 127.960 | 5,199 | yes |
+| q10_case1 | 2560 | 3350 | 8,776,263,750 | 314.983 | 13,998 | yes |
+| q10_case2 | 2305 | 3019 | 7,908,947,522 | 290.577 | 13,113 | yes |
+| q11_case1 | 5632 | 8048 | 46,401,393,019 | 760.112 | 33,484 | yes |
+| q11_case2 | 5023 | 6845 | 39,464,640,659 | 671.242 | 31,209 | yes |
+| q12_case1 | 12288 | 28814 | 725,041,947,494 | 7892.204 | 79,014 | yes |
 
-Q10 case2 produced partial depth progress after the same run moved on to it, but it was intentionally stopped and is not listed as a formal completed result.
+## Outputs
 
-### Artifacts
+Typical special-case output files:
 
-- Q4-Q7: `output/qk_custom_cases_20260605_133247/`
-- Q8 case1: `output/q8_case1_trim_20260605_154219/`
-- Q8 case2: `output/q8_case2_trim_20260605_154927/`
-- Q9 case1: `output/q9_case1_disk_bw256_20260607_113040/`
-- Q9 case2: `output/q9_case2_disk_bw256_path_20260609_170556/`
-- Q10 case1: `output/q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936/`
-- Complete route workbook: `output/qk_special_cases_routes.xlsx`
-- Custom cases: `custom_qk_cases.csv`
+| File | Meaning |
+|---|---|
+| `qk_special_cases.csv` | final result, state, Beam path, Batcher path |
+| `qk_case_progress.csv` | one row per completed case |
+| `qk_beam_depth_progress.csv` | per-depth Beam progress |
+| `qk_cuda_timing.csv` | CUDA timing breakdown |
+| `qk_beam_candidate_trace.csv` | candidate trace, usually 0 bytes in large official runs |
+| `qk_beam_disk_progress.csv` | disk visited progress only |
 
-## Dependencies
+Route workbook:
 
-- C++17 compiler (g++ recommended)
-- OpenMP
-- Threads
-- SQLite3
-- Python 3.11+
-- pandas, matplotlib (for plotting script)
+```text
+output/qk_special_cases_routes.xlsx
+```
 
-## Notes
+The workbook contains Q4-Q12 sheets. Q12 currently contains `q12_case1` only. Q12 was written with [tools/add_q12_routes_sheet_fast.py](tools/add_q12_routes_sheet_fast.py), which edits the workbook OpenXML directly to avoid loading the whole large workbook through a spreadsheet library.
 
-- `output/` keeps the official Q4 benchmark, Q4-Q10 special-case results, and the complete route workbook.
-- `legacy/` stores older and outdated data, including Q3 outputs, previous Q4 runs, failed or aborted path runs, smoke tests, verification experiments, old reports, and saved runs.
+## Preserved Artifact Directories
+
+Key directories currently kept:
+
+- `output/q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055/`
+- `output/q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_20260613_132118/`
+- `output/q11_cuda_cub_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_path_20260612_231014/`
+- `output/q9_cuda_diverse_bw256_pool4096_win4096_perturb010_20260613_090936/`
+- `output/q8_case1_trim_20260605_154219/`
+- `output/q8_case2_trim_20260605_154927/`
+- `output/q9_case1_disk_bw256_20260607_113040/`
+- `output/q9_case2_disk_bw256_path_20260609_170556/`
+- `output/cuda_opt_verify_q10_bw512_case1/`
+- `output/cuda_fix_verify_q10_case2/`
+- `output/q10_cuda_bw512_pool32768_win32768_restart1024_plateau1536_perturb010_case2_20260612_222245/`
+- `output/qk_custom_cases_20260605_133247/`
+- `output/q4_path_selected_10000_basic_no_path_20260604_205233/`
+
+The last Q4 random benchmark directory is a historical artifact. New Q4 random work belongs on `codex/q4-random-test`.
+
+## Cleanup Policy
+
+Delete after small tests unless explicitly promoted:
+
+- empty run directories
+- aborted runs
+- preview workbook renders
+- `verify_*` smoke outputs
+- stale `qk_beam_path_*.bin`
+- small test outputs superseded by official runs
+
+Do not delete automatically:
+
+- artifacts listed in `QK_RESULTS_INDEX.md`
+- `output/qk_special_cases_routes.xlsx`
+- user-requested partial progress
+- tracked artifacts referenced by README
+
+## Current Limits
+
+- Q12 case2 is not officially solved yet.
+- Q13-Q15 cases exist but have no official solved artifacts yet.
+- CUDA accelerates candidate generation and Top-K preselection, but final exact retained selection and materialization still have CPU work.
+- Beam is still heuristic. For Q12+ the main challenge is avoiding local best plateaus, not only increasing `beam_width`.

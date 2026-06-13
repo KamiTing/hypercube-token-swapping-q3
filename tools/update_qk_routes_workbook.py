@@ -13,17 +13,49 @@ WORKBOOK_PATH = ROOT / "output" / "qk_special_cases_routes.xlsx"
 csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 
 SOURCES = {
+    "Q8": [
+        ROOT / "output" / "q8_case1_trim_20260605_154219" / "qk_special_cases.csv",
+        ROOT / "output" / "q8_case2_trim_20260605_154927" / "qk_special_cases.csv",
+        ROOT
+        / "output"
+        / "q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055"
+        / "qk_special_cases.csv",
+    ],
+    "Q9": [
+        ROOT / "output" / "q9_case1_disk_bw256_20260607_113040" / "qk_special_cases.csv",
+        ROOT / "output" / "q9_case2_disk_bw256_path_20260609_170556" / "qk_special_cases.csv",
+        ROOT / "output" / "q9_cuda_diverse_bw256_pool4096_win4096_perturb010_20260613_090936" / "qk_special_cases.csv",
+        ROOT
+        / "output"
+        / "q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055"
+        / "qk_special_cases.csv",
+    ],
     "Q10": [
         ROOT / "output" / "cuda_opt_verify_q10_bw512_case1" / "qk_special_cases.csv",
+        ROOT / "output" / "cuda_fix_verify_q10_case2" / "qk_special_cases.csv",
         ROOT
         / "output"
         / "q10_cuda_bw512_pool32768_win32768_restart1024_plateau1536_perturb010_case2_20260612_222245"
+        / "qk_special_cases.csv",
+        ROOT
+        / "output"
+        / "q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055"
         / "qk_special_cases.csv",
     ],
     "Q11": [
         ROOT
         / "output"
         / "q11_cuda_cub_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_path_20260612_231014"
+        / "qk_special_cases.csv",
+        ROOT
+        / "output"
+        / "q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055"
+        / "qk_special_cases.csv",
+    ],
+    "Q12": [
+        ROOT
+        / "output"
+        / "q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_20260613_132118"
         / "qk_special_cases.csv",
     ],
 }
@@ -96,11 +128,22 @@ def route_chunks(swaps, max_chars=28000):
 
 
 def solved_rows_for_sheet(sheet_name):
-    rows = []
+    target_dim = int(sheet_name[1:])
+    best_by_case = {}
     for source in SOURCES[sheet_name]:
+        if not source.exists():
+            continue
         for row in read_rows(source):
-            if row.get("beam_status") == "solved" and row.get("beam_path_valid") == "1":
-                rows.append(row)
+            if int(row.get("dim", -1)) != target_dim:
+                continue
+            if row.get("beam_status") != "solved" or row.get("beam_path_valid") != "1":
+                continue
+            case = row["case_name"]
+            old = best_by_case.get(case)
+            key = (int(row["beam_steps"]), float(row["beam_sec"]))
+            if old is None or key < (int(old["beam_steps"]), float(old["beam_sec"])):
+                best_by_case[case] = row
+    rows = list(best_by_case.values())
     rows.sort(key=lambda r: case_number(r["case_name"]))
     return rows
 
@@ -117,12 +160,44 @@ def set_cell(cell, value, font=None, fill=None, align=None, border=True):
         cell.border = BORDER
 
 
+def clear_cell(cell):
+    cell.value = None
+    cell.font = Font(name="Calibri", size=6, color=BLACK)
+    cell.fill = PatternFill(fill_type=None)
+    cell.alignment = Alignment()
+    cell.border = Border()
+
+
+def unmerge_cell_if_needed(ws, row_idx, col_idx):
+    coordinate = ws.cell(row_idx, col_idx).coordinate
+    for merged_range in list(ws.merged_cells.ranges):
+        if coordinate in merged_range:
+            ws.unmerge_cells(str(merged_range))
+            return
+
+
 def clear_sheet_layout(ws):
     for merge in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merge))
     ws.delete_rows(1, ws.max_row)
     for col in range(1, ws.max_column + 1):
         ws.column_dimensions[get_column_letter(col)].width = 8.43
+
+
+def write_route_chunks(ws, start_row, start_col, chunks, route_font, route_fill, top_align):
+    route_col = start_col + 1
+    r = start_row
+    for chunk in chunks:
+        set_cell(
+            ws.cell(r, route_col),
+            chunk,
+            font=route_font,
+            fill=route_fill,
+            align=top_align,
+        )
+        ws.row_dimensions[r].height = 64
+        r += 1
+    return r
 
 
 def write_case(ws, row, start_col, dim):
@@ -196,17 +271,7 @@ def write_case(ws, row, start_col, dim):
         raise RuntimeError(f"{row['case_name']} Beam path does not replay to identity")
 
     chunks = route_chunks(swaps)
-    for i in range(0, len(chunks), 3):
-        for offset in range(3):
-            set_cell(
-                ws.cell(r, start_col + offset),
-                chunks[i + offset] if i + offset < len(chunks) else "",
-                font=route_font,
-                fill=route_fill,
-                align=top_align,
-            )
-        ws.row_dimensions[r].height = 64
-        r += 1
+    r = write_route_chunks(ws, r, start_col, chunks, route_font, route_fill, top_align)
 
     summary = [
         [f"Steps: {len(swaps)}", f"Beam: {row['beam_status']} ({row['beam_steps']})", f"Batcher: {'success' if row['batcher_success'] == '1' else 'fail'} ({row['batcher_swaps']})"],
@@ -233,8 +298,11 @@ def format_sheet(ws, dim, max_row, case_count):
     ws.row_dimensions[2].height = 25.5
 
     widths = {
+        8: (28, 174, 174),
+        9: (28, 185, 185),
         10: (28, 174, 174),
         11: (28, 205, 205),
+        12: (28, 245, 245),
     }[dim]
     for case_idx in range(case_count):
         start_col = 1 + case_idx * 4
@@ -268,26 +336,69 @@ def rebuild_sheet(wb, title, rows, dim, index):
     return ws
 
 
-def main():
-    wb = load_workbook(WORKBOOK_PATH)
-    q10_rows = solved_rows_for_sheet("Q10")
-    q11_rows = solved_rows_for_sheet("Q11")
-    if len(q10_rows) != 2:
-        raise RuntimeError(f"Expected 2 Q10 rows, found {len(q10_rows)}")
-    if len(q11_rows) != 2:
-        raise RuntimeError(f"Expected 2 Q11 rows, found {len(q11_rows)}")
+def center_existing_route_rows(wb):
+    for ws in wb.worksheets:
+        for start_col in range(1, ws.max_column + 1, 4):
+            route_col = start_col + 1
+            right_col = start_col + 2
+            if right_col > ws.max_column:
+                continue
+            for row_idx in range(1, ws.max_row + 1):
+                source = ws.cell(row_idx, start_col)
+                middle = ws.cell(row_idx, route_col)
+                right = ws.cell(row_idx, right_col)
+                if not (isinstance(source.value, str) and source.value.startswith("Route")):
+                    continue
+                if middle.value not in (None, "") or right.value not in (None, ""):
+                    continue
 
-    q10_index = wb.sheetnames.index("Q10") if "Q10" in wb.sheetnames else len(wb.sheetnames)
-    rebuild_sheet(wb, "Q10", q10_rows, 10, q10_index)
-    q11_index = wb.sheetnames.index("Q10") + 1
-    rebuild_sheet(wb, "Q11", q11_rows, 11, q11_index)
+                unmerge_cell_if_needed(ws, row_idx, start_col)
+                unmerge_cell_if_needed(ws, row_idx, route_col)
+                unmerge_cell_if_needed(ws, row_idx, right_col)
+                source = ws.cell(row_idx, start_col)
+                target = ws.cell(row_idx, route_col)
+                target.value = source.value
+                target.font = copy(source.font)
+                target.fill = copy(source.fill)
+                target.alignment = copy(source.alignment)
+                target.border = copy(source.border)
+                clear_cell(source)
+
+
+def main():
+    requested = [arg.upper() for arg in sys.argv[1:]]
+    requested = requested or ["Q8", "Q9", "Q10", "Q11"]
+    unknown = [sheet for sheet in requested if sheet not in SOURCES]
+    if unknown:
+        raise RuntimeError(f"Unknown sheet(s): {unknown}")
+
+    wb = load_workbook(WORKBOOK_PATH)
+
+    summaries = {}
+    for sheet_name in requested:
+        rows = solved_rows_for_sheet(sheet_name)
+        expected = 1 if sheet_name == "Q12" else 2
+        if len(rows) != expected:
+            raise RuntimeError(f"Expected {expected} {sheet_name} rows, found {len(rows)}")
+
+        dim = int(sheet_name[1:])
+        previous = f"Q{dim - 1}"
+        if sheet_name in wb.sheetnames:
+            index = wb.sheetnames.index(sheet_name)
+        elif previous in wb.sheetnames:
+            index = wb.sheetnames.index(previous) + 1
+        else:
+            index = len(wb.sheetnames)
+        rebuild_sheet(wb, sheet_name, rows, dim, index)
+        summaries[sheet_name] = [(r["case_name"], r["beam_steps"]) for r in rows]
+
+    center_existing_route_rows(wb)
 
     wb.save(WORKBOOK_PATH)
     print(
         {
             "workbook": str(WORKBOOK_PATH),
-            "Q10": [(r["case_name"], r["beam_steps"]) for r in q10_rows],
-            "Q11": [(r["case_name"], r["beam_steps"]) for r in q11_rows],
+            **summaries,
         }
     )
 

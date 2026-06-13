@@ -88,7 +88,11 @@ CudaLayerGenerationResult generate_layer_only_candidates_cuda(
     const std::vector<Fingerprint128>& recent_delta_fingerprints,
     bool recent_delta_has_eviction,
     bool force_recent_rebuild,
-    bool require_packed_tie_key
+    bool require_packed_tie_key,
+    CudaTopKMode topk_mode,
+    int retained_limit,
+    double perturbation_ratio,
+    BeamSelectionPolicy selection_policy
 );
 
 } // namespace qk

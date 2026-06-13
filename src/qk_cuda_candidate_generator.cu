@@ -12,6 +12,7 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <iterator>
@@ -25,13 +26,6 @@ using namespace std;
 namespace qk {
 namespace {
 
-enum class CudaTopKMode {
-    FullSort = 0,
-    Tiled = 1,
-    Cub = 2,
-    CubFallbackFullSort = 3
-};
-
 struct DeviceFingerprint128 {
     uint64_t low;
     uint64_t high;
@@ -40,6 +34,7 @@ struct DeviceFingerprint128 {
 struct DeviceEdge {
     int u;
     int v;
+    int bit;
 };
 
 struct DeviceCandidate {
@@ -82,6 +77,14 @@ struct DeviceCandidateLess {
         }
         return a.order < b.order;
     }
+};
+
+enum class DeviceTopKKeyMode {
+    Greedy = 0,
+    MaxDistance = 1,
+    Misplaced = 2,
+    Perturb = 3,
+    EdgeBit = 4
 };
 
 __host__ __device__ uint64_t splitmix64_device(uint64_t value) {
@@ -287,6 +290,83 @@ __host__ __device__ unsigned long long candidate_prefix_key_device(const DeviceC
     return (invalid << 63) | (total << 41) | (max_dist << 36) | (misplaced << 19) | edge;
 }
 
+__host__ __device__ unsigned long long pack_limited_key_device(
+    int invalid,
+    unsigned long long primary,
+    unsigned long long secondary,
+    unsigned long long tertiary,
+    unsigned long long edge
+) {
+    constexpr unsigned long long primary_mask = (1ULL << 20) - 1ULL;
+    constexpr unsigned long long secondary_mask = (1ULL << 20) - 1ULL;
+    constexpr unsigned long long tertiary_mask = (1ULL << 5) - 1ULL;
+    constexpr unsigned long long edge_mask = (1ULL << 18) - 1ULL;
+    return (static_cast<unsigned long long>(invalid ? 1 : 0) << 63) |
+           ((primary & primary_mask) << 43) |
+           ((secondary & secondary_mask) << 23) |
+           ((tertiary & tertiary_mask) << 18) |
+           (edge & edge_mask);
+}
+
+__host__ __device__ unsigned long long perturbation_key_device(
+    const DeviceCandidate& candidate,
+    int depth
+) {
+    uint64_t key =
+        candidate.fingerprint.low ^
+        (candidate.fingerprint.high + 0x9E3779B97F4A7C15ULL) ^
+        (static_cast<uint64_t>(depth) * 0xBF58476D1CE4E5B9ULL) ^
+        (static_cast<uint64_t>(candidate.edge_id + 1) * 0x94D049BB133111EBULL) ^
+        static_cast<uint64_t>(candidate.order);
+    return splitmix64_device(key);
+}
+
+__host__ __device__ unsigned long long candidate_diverse_key_device(
+    const DeviceCandidate& candidate,
+    const DeviceEdge* edges,
+    int mode,
+    int target_bit,
+    int depth
+) {
+    if (!candidate.valid) {
+        return ~0ULL;
+    }
+    unsigned long long total = static_cast<unsigned long long>(
+        candidate.total_dist > 0 ? candidate.total_dist : 0
+    );
+    unsigned long long max_dist = static_cast<unsigned long long>(
+        candidate.max_dist > 0 ? candidate.max_dist : 0
+    );
+    unsigned long long misplaced = static_cast<unsigned long long>(
+        candidate.misplaced > 0 ? candidate.misplaced : 0
+    );
+    unsigned long long edge = static_cast<unsigned long long>(
+        candidate.edge_id > 0 ? candidate.edge_id : 0
+    );
+
+    switch (static_cast<DeviceTopKKeyMode>(mode)) {
+        case DeviceTopKKeyMode::Greedy:
+            return candidate_prefix_key_device(candidate);
+        case DeviceTopKKeyMode::MaxDistance:
+            return pack_limited_key_device(0, max_dist, total, misplaced, edge);
+        case DeviceTopKKeyMode::Misplaced:
+            return pack_limited_key_device(0, misplaced, total, max_dist, edge);
+        case DeviceTopKKeyMode::Perturb:
+            return perturbation_key_device(candidate, depth);
+        case DeviceTopKKeyMode::EdgeBit: {
+            int edge_bit = -1;
+            if (candidate.edge_id >= 0) {
+                edge_bit = edges[candidate.edge_id].bit;
+            }
+            if (edge_bit != target_bit) {
+                return ~0ULL;
+            }
+            return candidate_prefix_key_device(candidate);
+        }
+    }
+    return ~0ULL;
+}
+
 __global__ void pack_candidate_prefix_keys_kernel(
     const DeviceCandidate* candidates,
     size_t count,
@@ -298,6 +378,49 @@ __global__ void pack_candidate_prefix_keys_kernel(
         return;
     }
     keys[index] = candidate_prefix_key_device(candidates[index]);
+}
+
+__global__ void pack_candidate_diverse_keys_kernel(
+    const DeviceCandidate* candidates,
+    const DeviceEdge* edges,
+    size_t count,
+    int mode,
+    int target_bit,
+    int depth,
+    unsigned long long* keys
+) {
+    size_t index = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) +
+                   static_cast<size_t>(threadIdx.x);
+    if (index >= count) {
+        return;
+    }
+    keys[index] = candidate_diverse_key_device(
+        candidates[index],
+        edges,
+        mode,
+        target_bit,
+        depth
+    );
+}
+
+__global__ void pack_threshold_fingerprint_high_keys_kernel(
+    const DeviceCandidate* candidates,
+    const unsigned long long* prefix_keys,
+    size_t count,
+    unsigned long long threshold,
+    unsigned long long* high_keys
+) {
+    size_t index = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) +
+                   static_cast<size_t>(threadIdx.x);
+    if (index >= count) {
+        return;
+    }
+    const DeviceCandidate& candidate = candidates[index];
+    if (candidate.valid && prefix_keys[index] == threshold) {
+        high_keys[index] = candidate.fingerprint.high;
+    } else {
+        high_keys[index] = ~0ULL;
+    }
 }
 
 __global__ void count_prefix_threshold_kernel(
@@ -319,6 +442,35 @@ __global__ void count_prefix_threshold_kernel(
     }
 }
 
+__global__ void count_refined_threshold_kernel(
+    const DeviceCandidate* candidates,
+    const unsigned long long* prefix_keys,
+    size_t count,
+    unsigned long long prefix_threshold,
+    unsigned long long high_threshold,
+    unsigned long long* counts
+) {
+    size_t index = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) +
+                   static_cast<size_t>(threadIdx.x);
+    if (index >= count) {
+        return;
+    }
+    const DeviceCandidate& candidate = candidates[index];
+    if (!candidate.valid) {
+        return;
+    }
+    unsigned long long prefix_key = prefix_keys[index];
+    if (prefix_key < prefix_threshold) {
+        atomicAdd(&counts[0], 1ULL);
+    } else if (prefix_key == prefix_threshold) {
+        if (candidate.fingerprint.high < high_threshold) {
+            atomicAdd(&counts[1], 1ULL);
+        } else if (candidate.fingerprint.high == high_threshold) {
+            atomicAdd(&counts[2], 1ULL);
+        }
+    }
+}
+
 __global__ void select_prefix_threshold_kernel(
     const DeviceCandidate* candidates,
     const unsigned long long* keys,
@@ -335,6 +487,37 @@ __global__ void select_prefix_threshold_kernel(
     if (keys[index] <= threshold) {
         unsigned long long out_index = atomicAdd(selected_count, 1ULL);
         selected[out_index] = candidates[index];
+    }
+}
+
+__global__ void select_refined_threshold_kernel(
+    const DeviceCandidate* candidates,
+    const unsigned long long* prefix_keys,
+    size_t count,
+    unsigned long long prefix_threshold,
+    unsigned long long high_threshold,
+    DeviceCandidate* selected,
+    unsigned long long* selected_count
+) {
+    size_t index = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) +
+                   static_cast<size_t>(threadIdx.x);
+    if (index >= count) {
+        return;
+    }
+    const DeviceCandidate& candidate = candidates[index];
+    if (!candidate.valid) {
+        return;
+    }
+    unsigned long long prefix_key = prefix_keys[index];
+    bool keep =
+        prefix_key < prefix_threshold ||
+        (
+            prefix_key == prefix_threshold &&
+            candidate.fingerprint.high <= high_threshold
+        );
+    if (keep) {
+        unsigned long long out_index = atomicAdd(selected_count, 1ULL);
+        selected[out_index] = candidate;
     }
 }
 
@@ -490,6 +673,7 @@ struct CudaLayerContext {
     DeviceFingerprint128* d_recent_delta = nullptr;
     DeviceCandidate* d_candidates = nullptr;
     unsigned long long* d_candidate_prefix_keys = nullptr;
+    unsigned long long* d_candidate_secondary_keys = nullptr;
     unsigned long long* d_topk_prefix_keys = nullptr;
     DeviceCandidate* d_topk_candidates = nullptr;
     unsigned long long* d_topk_counts = nullptr;
@@ -505,6 +689,7 @@ struct CudaLayerContext {
     size_t recent_delta_capacity = 0;
     size_t candidate_capacity = 0;
     size_t candidate_prefix_key_capacity = 0;
+    size_t candidate_secondary_key_capacity = 0;
     size_t topk_prefix_key_capacity = 0;
     size_t topk_candidate_capacity = 0;
     size_t topk_count_capacity = 0;
@@ -539,6 +724,7 @@ struct CudaLayerContext {
         release_device_buffer(d_recent_delta, recent_delta_capacity);
         release_device_buffer(d_candidates, candidate_capacity);
         release_device_buffer(d_candidate_prefix_keys, candidate_prefix_key_capacity);
+        release_device_buffer(d_candidate_secondary_keys, candidate_secondary_key_capacity);
         release_device_buffer(d_topk_prefix_keys, topk_prefix_key_capacity);
         release_device_buffer(d_topk_candidates, topk_candidate_capacity);
         release_device_buffer(d_topk_counts, topk_count_capacity);
@@ -624,6 +810,15 @@ struct CudaLayerContext {
         ensure_device_capacity(d_topk_counts, topk_count_capacity, 3, "cudaMalloc topk counts");
     }
 
+    void ensure_secondary_key_buffer(size_t candidate_count) {
+        ensure_device_capacity(
+            d_candidate_secondary_keys,
+            candidate_secondary_key_capacity,
+            candidate_count,
+            "cudaMalloc candidate secondary keys"
+        );
+    }
+
     void ensure_topk_temp_storage(size_t needed) {
         if (needed == 0 || topk_temp_storage_capacity >= needed) {
             return;
@@ -639,24 +834,6 @@ thread_local CudaLayerContext cuda_layer_context;
 
 double seconds_since(Clock::time_point start) {
     return chrono::duration<double>(Clock::now() - start).count();
-}
-
-CudaTopKMode selected_topk_mode() {
-    const char* value = getenv("QK_CUDA_TOPK_MODE");
-    if (value == nullptr) {
-        return CudaTopKMode::FullSort;
-    }
-    string mode(value);
-    transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
-        return static_cast<char>(tolower(ch));
-    });
-    if (mode == "tiled" || mode == "tile" || mode == "exact_tiled") {
-        return CudaTopKMode::Tiled;
-    }
-    if (mode == "cub" || mode == "device_topk" || mode == "cub_topk") {
-        return CudaTopKMode::Cub;
-    }
-    return CudaTopKMode::FullSort;
 }
 
 int hypercube_dim_from_node_count(int node_count) {
@@ -929,8 +1106,148 @@ vector<DeviceCandidate> select_top_cub(
 
     size_t selected_count = static_cast<size_t>(h_counts[0] + h_counts[1]);
     size_t tie_cap = choose_cub_tie_cap(keep_limit);
-    if (selected_count == 0 || selected_count > tie_cap) {
+    if (selected_count == 0) {
         return fallback_full_sort();
+    }
+
+    if (selected_count > tie_cap) {
+        size_t less_count = static_cast<size_t>(h_counts[0]);
+        if (less_count >= keep_limit) {
+            return fallback_full_sort();
+        }
+
+        size_t remaining_from_tie = keep_limit - less_count;
+        ctx.ensure_topk_buffers(current_chunk, max(k, remaining_from_tie));
+        ctx.ensure_secondary_key_buffer(current_chunk);
+        timing.kernel_sec += ctx.time_gpu([&]() {
+            pack_threshold_fingerprint_high_keys_kernel<<<blocks, threads_per_block>>>(
+                ctx.d_candidates,
+                ctx.d_candidate_prefix_keys,
+                current_chunk,
+                threshold,
+                ctx.d_candidate_secondary_keys
+            );
+            check_cuda(cudaGetLastError(), "pack_threshold_fingerprint_high_keys_kernel launch");
+        }, "pack_threshold_fingerprint_high_keys_kernel sync");
+
+        size_t secondary_temp_storage_bytes = 0;
+        check_cuda(cub::DeviceTopK::MinPairs(
+            nullptr,
+            secondary_temp_storage_bytes,
+            ctx.d_candidate_secondary_keys,
+            ctx.d_topk_prefix_keys,
+            ctx.d_candidates,
+            ctx.d_topk_candidates,
+            current_chunk,
+            remaining_from_tie,
+            env
+        ), "cub::DeviceTopK::MinPairs secondary temp query");
+        ctx.ensure_topk_temp_storage(secondary_temp_storage_bytes);
+
+        timing.topk_tiles += 1;
+        timing.sort_sec += ctx.time_gpu([&]() {
+            size_t available_temp_storage = ctx.topk_temp_storage_capacity;
+            check_cuda(cub::DeviceTopK::MinPairs(
+                ctx.d_topk_temp_storage,
+                available_temp_storage,
+                ctx.d_candidate_secondary_keys,
+                ctx.d_topk_prefix_keys,
+                ctx.d_candidates,
+                ctx.d_topk_candidates,
+                current_chunk,
+                remaining_from_tie,
+                env
+            ), "cub::DeviceTopK::MinPairs secondary");
+        }, "cub::DeviceTopK::MinPairs secondary sync");
+
+        vector<unsigned long long> h_secondary_keys(remaining_from_tie);
+        timing.d2h_sec += ctx.time_gpu([&]() {
+            check_cuda(cudaMemcpy(
+                h_secondary_keys.data(),
+                ctx.d_topk_prefix_keys,
+                remaining_from_tie * sizeof(unsigned long long),
+                cudaMemcpyDeviceToHost
+            ), "cudaMemcpy cub secondary topk keys");
+        }, "cudaMemcpy cub secondary topk keys sync");
+        unsigned long long high_threshold =
+            *max_element(h_secondary_keys.begin(), h_secondary_keys.end());
+
+        timing.h2d_sec += ctx.time_gpu([&]() {
+            check_cuda(cudaMemcpy(
+                ctx.d_topk_counts,
+                zero_counts,
+                sizeof(zero_counts),
+                cudaMemcpyHostToDevice
+            ), "cudaMemcpy refined topk counts zero");
+        }, "cudaMemcpy refined topk counts zero sync");
+        timing.kernel_sec += ctx.time_gpu([&]() {
+            count_refined_threshold_kernel<<<blocks, threads_per_block>>>(
+                ctx.d_candidates,
+                ctx.d_candidate_prefix_keys,
+                current_chunk,
+                threshold,
+                high_threshold,
+                ctx.d_topk_counts
+            );
+            check_cuda(cudaGetLastError(), "count_refined_threshold_kernel launch");
+        }, "count_refined_threshold_kernel sync");
+
+        unsigned long long h_refined_counts[3] = {0, 0, 0};
+        timing.d2h_sec += ctx.time_gpu([&]() {
+            check_cuda(cudaMemcpy(
+                h_refined_counts,
+                ctx.d_topk_counts,
+                sizeof(h_refined_counts),
+                cudaMemcpyDeviceToHost
+            ), "cudaMemcpy refined topk counts");
+        }, "cudaMemcpy refined topk counts sync");
+
+        selected_count = static_cast<size_t>(
+            h_refined_counts[0] + h_refined_counts[1] + h_refined_counts[2]
+        );
+        if (selected_count == 0 || selected_count > tie_cap) {
+            return fallback_full_sort();
+        }
+
+        ctx.ensure_topk_buffers(current_chunk, max(k, selected_count));
+        timing.h2d_sec += ctx.time_gpu([&]() {
+            check_cuda(cudaMemset(
+                ctx.d_topk_counts,
+                0,
+                sizeof(unsigned long long)
+            ), "cudaMemset refined selected count");
+        }, "cudaMemset refined selected count sync");
+        timing.kernel_sec += ctx.time_gpu([&]() {
+            select_refined_threshold_kernel<<<blocks, threads_per_block>>>(
+                ctx.d_candidates,
+                ctx.d_candidate_prefix_keys,
+                current_chunk,
+                threshold,
+                high_threshold,
+                ctx.d_topk_candidates,
+                ctx.d_topk_counts
+            );
+            check_cuda(cudaGetLastError(), "select_refined_threshold_kernel launch");
+        }, "select_refined_threshold_kernel sync");
+
+        vector<DeviceCandidate> selected(selected_count);
+        timing.d2h_sec += ctx.time_gpu([&]() {
+            check_cuda(cudaMemcpy(
+                selected.data(),
+                ctx.d_topk_candidates,
+                selected_count * sizeof(DeviceCandidate),
+                cudaMemcpyDeviceToHost
+            ), "cudaMemcpy cub refined selected candidates");
+        }, "cudaMemcpy cub refined selected candidates sync");
+
+        auto merge_start = Clock::now();
+        sort(selected.begin(), selected.end(), DeviceCandidateLess{});
+        if (selected.size() > keep_limit) {
+            selected.resize(keep_limit);
+        }
+        timing.cpu_merge_sec += seconds_since(merge_start);
+        timing.topk_select_sec += seconds_since(topk_start);
+        return selected;
     }
 
     ctx.ensure_topk_buffers(current_chunk, max(k, selected_count));
@@ -971,6 +1288,223 @@ vector<DeviceCandidate> select_top_cub(
     timing.cpu_merge_sec += seconds_since(merge_start);
     timing.topk_select_sec += seconds_since(topk_start);
     return selected;
+}
+
+vector<DeviceCandidate> select_top_diverse_key_cub(
+    CudaLayerContext& ctx,
+    size_t current_chunk,
+    size_t keep_limit,
+    int depth,
+    DeviceTopKKeyMode key_mode,
+    int target_bit,
+    CudaLayerTiming& timing
+) {
+    if (keep_limit == 0 || current_chunk == 0) {
+        return {};
+    }
+    timing.topk_mode = static_cast<int>(CudaTopKMode::Cub);
+    auto topk_start = Clock::now();
+    size_t k = min(keep_limit, current_chunk);
+    ctx.ensure_topk_buffers(current_chunk, k);
+
+    constexpr int threads_per_block = 256;
+    int blocks = static_cast<int>((current_chunk + threads_per_block - 1) / threads_per_block);
+    timing.kernel_sec += ctx.time_gpu([&]() {
+        pack_candidate_diverse_keys_kernel<<<blocks, threads_per_block>>>(
+            ctx.d_candidates,
+            ctx.d_edges,
+            current_chunk,
+            static_cast<int>(key_mode),
+            target_bit,
+            depth,
+            ctx.d_candidate_prefix_keys
+        );
+        check_cuda(cudaGetLastError(), "pack_candidate_diverse_keys_kernel launch");
+    }, "pack_candidate_diverse_keys_kernel sync");
+
+    auto env = cuda::execution::require(
+        cuda::execution::determinism::not_guaranteed,
+        cuda::execution::output_ordering::unsorted
+    );
+
+    size_t temp_storage_bytes = 0;
+    check_cuda(cub::DeviceTopK::MinPairs(
+        nullptr,
+        temp_storage_bytes,
+        ctx.d_candidate_prefix_keys,
+        ctx.d_topk_prefix_keys,
+        ctx.d_candidates,
+        ctx.d_topk_candidates,
+        current_chunk,
+        k,
+        env
+    ), "cub::DeviceTopK::MinPairs diverse temp query");
+    ctx.ensure_topk_temp_storage(temp_storage_bytes);
+
+    timing.topk_tiles += 1;
+    timing.sort_sec += ctx.time_gpu([&]() {
+        size_t available_temp_storage = ctx.topk_temp_storage_capacity;
+        check_cuda(cub::DeviceTopK::MinPairs(
+            ctx.d_topk_temp_storage,
+            available_temp_storage,
+            ctx.d_candidate_prefix_keys,
+            ctx.d_topk_prefix_keys,
+            ctx.d_candidates,
+            ctx.d_topk_candidates,
+            current_chunk,
+            k,
+            env
+        ), "cub::DeviceTopK::MinPairs diverse");
+    }, "cub::DeviceTopK::MinPairs diverse sync");
+
+    vector<DeviceCandidate> selected = copy_device_top(
+        ctx,
+        ctx.d_topk_candidates,
+        k,
+        timing
+    );
+    timing.topk_select_sec += seconds_since(topk_start);
+    return selected;
+}
+
+void append_candidate_pool(
+    vector<DeviceCandidate>& merged,
+    vector<DeviceCandidate>&& candidates
+) {
+    merged.insert(
+        merged.end(),
+        make_move_iterator(candidates.begin()),
+        make_move_iterator(candidates.end())
+    );
+}
+
+size_t oversampled_slots(int slots, size_t keep_limit, size_t minimum) {
+    if (slots <= 0 || keep_limit == 0) {
+        return 0;
+    }
+    size_t wanted = max<size_t>(static_cast<size_t>(slots) * 8ULL, minimum);
+    return min(keep_limit, wanted);
+}
+
+vector<DeviceCandidate> select_diverse_gpu_pool(
+    CudaLayerContext& ctx,
+    size_t current_chunk,
+    size_t keep_limit,
+    int retained_limit,
+    double perturbation_ratio,
+    int depth,
+    int dim,
+    CudaLayerTiming& timing
+) {
+    if (retained_limit <= 0 || keep_limit == 0) {
+        return {};
+    }
+
+    int perturb_slots = 0;
+    if (perturbation_ratio > 0.0) {
+        perturb_slots = static_cast<int>(ceil(static_cast<double>(retained_limit) * perturbation_ratio));
+        perturb_slots = min(max(perturb_slots, 1), retained_limit);
+    }
+    int greedy_slots = retained_limit - perturb_slots;
+    int max_dist_slots = greedy_slots * 20 / 100;
+    int misplaced_slots = greedy_slots * 15 / 100;
+    int plain_greedy_slots = greedy_slots * 50 / 100;
+    if (plain_greedy_slots == 0 && greedy_slots > 0) {
+        plain_greedy_slots = 1;
+    }
+    while (plain_greedy_slots + max_dist_slots + misplaced_slots > greedy_slots) {
+        if (misplaced_slots > 0) {
+            misplaced_slots--;
+        } else if (max_dist_slots > 0) {
+            max_dist_slots--;
+        } else {
+            plain_greedy_slots--;
+        }
+    }
+    int edge_slots = greedy_slots - plain_greedy_slots - max_dist_slots - misplaced_slots;
+
+    vector<DeviceCandidate> merged;
+    merged.reserve(min<size_t>(keep_limit, static_cast<size_t>(retained_limit) * 8ULL));
+
+    size_t greedy_keep = min(
+        keep_limit,
+        max<size_t>(
+            static_cast<size_t>(retained_limit) * 2ULL,
+            oversampled_slots(plain_greedy_slots, keep_limit, 512)
+        )
+    );
+    append_candidate_pool(
+        merged,
+        select_top_diverse_key_cub(
+            ctx,
+            current_chunk,
+            greedy_keep,
+            depth,
+            DeviceTopKKeyMode::Greedy,
+            -1,
+            timing
+        )
+    );
+
+    append_candidate_pool(
+        merged,
+        select_top_diverse_key_cub(
+            ctx,
+            current_chunk,
+            oversampled_slots(max_dist_slots, keep_limit, 512),
+            depth,
+            DeviceTopKKeyMode::MaxDistance,
+            -1,
+            timing
+        )
+    );
+
+    append_candidate_pool(
+        merged,
+        select_top_diverse_key_cub(
+            ctx,
+            current_chunk,
+            oversampled_slots(misplaced_slots, keep_limit, 512),
+            depth,
+            DeviceTopKKeyMode::Misplaced,
+            -1,
+            timing
+        )
+    );
+
+    if (edge_slots > 0 && dim > 0) {
+        int per_bit_slots = max(1, (edge_slots + dim - 1) / dim);
+        size_t per_bit_keep = oversampled_slots(per_bit_slots, keep_limit, 64);
+        for (int bit = 0; bit < dim; ++bit) {
+            append_candidate_pool(
+                merged,
+                select_top_diverse_key_cub(
+                    ctx,
+                    current_chunk,
+                    per_bit_keep,
+                    depth,
+                    DeviceTopKKeyMode::EdgeBit,
+                    bit,
+                    timing
+                )
+            );
+        }
+    }
+
+    append_candidate_pool(
+        merged,
+        select_top_diverse_key_cub(
+            ctx,
+            current_chunk,
+            oversampled_slots(perturb_slots, keep_limit, 512),
+            depth,
+            DeviceTopKKeyMode::Perturb,
+            -1,
+            timing
+        )
+    );
+
+    return merged;
 }
 
 bool ensure_candidate_capacity(CudaLayerContext& ctx, size_t& chunk_candidates) {
@@ -1028,7 +1562,7 @@ CudaLayerGenerationResult generate_layer_only_candidates_cuda(
     const vector<CudaLayerParent>& parents,
     const vector<Edge>& edges,
     int node_count,
-    int,
+    int depth,
     int candidate_keep_limit,
     long long candidate_order_base,
     const vector<Fingerprint128>& recent_fingerprints,
@@ -1037,17 +1571,12 @@ CudaLayerGenerationResult generate_layer_only_candidates_cuda(
     const vector<Fingerprint128>& recent_delta_fingerprints,
     bool recent_delta_has_eviction,
     bool force_recent_rebuild,
-    bool require_packed_tie_key
+    bool,
+    CudaTopKMode topk_mode,
+    int retained_limit,
+    double perturbation_ratio,
+    BeamSelectionPolicy selection_policy
 ) {
-    if (require_packed_tie_key) {
-        return {
-            false,
-            false,
-            0,
-            {},
-            "CUDA candidate backend does not yet implement packed-key tie ordering; use Q9+ or CPU."
-        };
-    }
     if (parents.empty() || edges.empty() || candidate_keep_limit <= 0) {
         return {true, false, 0, {}, {}};
     }
@@ -1108,7 +1637,7 @@ CudaLayerGenerationResult generate_layer_only_candidates_cuda(
     if (upload_edges) {
         h_edges.resize(edges.size());
         for (size_t i = 0; i < edges.size(); ++i) {
-            h_edges[i] = {edges[i].u, edges[i].v};
+            h_edges[i] = {edges[i].u, edges[i].v, edges[i].bit};
         }
     }
 
@@ -1272,8 +1801,23 @@ CudaLayerGenerationResult generate_layer_only_candidates_cuda(
         total_valid_count += valid_count;
 
         vector<DeviceCandidate> h_top;
-        CudaTopKMode topk_mode = selected_topk_mode();
-        if (topk_mode == CudaTopKMode::Tiled) {
+        bool use_diverse_gpu_pool =
+            topk_mode == CudaTopKMode::Cub &&
+            selection_policy == BeamSelectionPolicy::Diverse &&
+            retained_limit > 0 &&
+            keep_limit > static_cast<size_t>(retained_limit);
+        if (use_diverse_gpu_pool) {
+            h_top = select_diverse_gpu_pool(
+                ctx,
+                current_chunk,
+                keep_limit,
+                retained_limit,
+                perturbation_ratio,
+                depth,
+                hypercube_dim_from_node_count(node_count),
+                timing
+            );
+        } else if (topk_mode == CudaTopKMode::Tiled) {
             h_top = select_top_tiled(ctx, current_chunk, keep_limit, timing);
         } else if (topk_mode == CudaTopKMode::Cub) {
             h_top = select_top_cub(

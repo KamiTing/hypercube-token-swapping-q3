@@ -45,7 +45,8 @@ void print_usage(const char* exe) {
          << " [path_opt_stride=0] [path_opt_word_reduce=1]"
          << " [layer_pool_width=0] [layer_visited_window=0]"
          << " [layer_restart_max_width=0] [layer_plateau_limit=0] [layer_restart_growth=2]"
-         << " [layer_perturbation_ratio=0.0] [candidate_backend=cpu]\n"
+         << " [layer_perturbation_ratio=0.0] [candidate_backend=cpu]"
+         << " [beam_selection_policy=greedy] [cuda_topk_mode=cub]\n"
          << "max_depth=0 uses auto depth dim * 2^dim for each Qdim.\n";
     cerr << "Use custom_cases_csv=- to select built-in cases while passing later options.\n";
     cerr << "candidate_trace_mode: 0=none, 1=retained beam only, 2=all new candidates.\n";
@@ -62,7 +63,13 @@ void print_usage(const char* exe) {
     cerr << "layer_perturbation_ratio: only for layer_only; fraction of retained beam slots selected by "
          << "deterministic hash perturbation from the candidate pool instead of pure greedy ranking.\n";
     cerr << "candidate_backend: cpu/0 uses the existing CPU generator; cuda/1 requires a CUDA build; "
-         << "auto/2 uses CUDA when supported and otherwise falls back to CPU.\n";
+         << "auto/2 uses CUDA when supported and otherwise falls back to CPU. CUDA layer_only "
+         << "uses fingerprint tie ordering for Q8 and below instead of exact packed-key CPU tie ordering.\n";
+    cerr << "beam_selection_policy: greedy/0 keeps the legacy score order; diverse/1 splits retained "
+         << "slots across greedy, max-distance, misplaced, and edge-dimension queues.\n";
+    cerr << "cuda_topk_mode: only for candidate_backend=cuda/auto; cub/2 uses CUB DeviceTopK "
+         << "with refined tie handling, full_sort/0 keeps the old full GPU sort, and tiled/1 "
+         << "sorts smaller GPU tiles before CPU merge.\n";
 }
 
 } // namespace qk
@@ -101,6 +108,8 @@ int main(int argc, char** argv) {
     int layer_restart_growth = 2;
     double layer_perturbation_ratio = 0.0;
     BeamCandidateBackend candidate_backend = BeamCandidateBackend::Cpu;
+    BeamSelectionPolicy selection_policy = BeamSelectionPolicy::Greedy;
+    CudaTopKMode cuda_topk_mode = CudaTopKMode::Cub;
 
     try {
         if (argc > 1) min_dim = stoi(argv[1]);
@@ -139,6 +148,8 @@ int main(int argc, char** argv) {
         if (argc > 28) layer_restart_growth = stoi(argv[28]);
         if (argc > 29) layer_perturbation_ratio = stod(argv[29]);
         if (argc > 30) candidate_backend = parse_beam_candidate_backend(argv[30]);
+        if (argc > 31) selection_policy = parse_beam_selection_policy(argv[31]);
+        if (argc > 32) cuda_topk_mode = parse_cuda_topk_mode(argv[32]);
         if (case_name_filter == "-") case_name_filter.clear();
     } catch (const exception& e) {
         cerr << "Argument parse error: " << e.what() << "\n";
@@ -200,12 +211,6 @@ int main(int argc, char** argv) {
         if (!cuda_candidate_backend_available()) {
             cerr << "candidate_backend=cuda requested, but "
                  << cuda_candidate_backend_unavailable_reason() << "\n";
-            return 2;
-        }
-        if (min_dim <= 8) {
-            cerr << "candidate_backend=cuda currently supports Q9+ only because Q8 and below "
-                 << "need packed-key tie ordering for exact CPU parity. Use candidate_backend=auto "
-                 << "or cpu for Q8 and below.\n";
             return 2;
         }
     }
@@ -360,6 +365,8 @@ int main(int argc, char** argv) {
          << ", layer_restart_growth=" << layer_restart_growth
          << ", layer_perturbation_ratio=" << fixed << setprecision(3) << layer_perturbation_ratio
          << ", candidate_backend=" << beam_candidate_backend_name(candidate_backend)
+         << ", beam_selection_policy=" << beam_selection_policy_name(selection_policy)
+         << ", cuda_topk_mode=" << cuda_topk_mode_name(cuda_topk_mode)
          << ", output_dir=" << output_dir.generic_string() << "\n";
     if (use_custom_cases) {
         cout << "custom_cases=" << custom_cases_path.generic_string() << "\n";
@@ -453,7 +460,9 @@ int main(int argc, char** argv) {
                         layer_visited_window,
                         layer_plateau_limit,
                         layer_perturbation_ratio,
-                        candidate_backend
+                        candidate_backend,
+                        cuda_topk_mode,
+                        selection_policy
                     );
 
                     string attempt_status = attempt.status;

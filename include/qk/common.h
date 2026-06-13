@@ -66,6 +66,18 @@ enum class BeamCandidateBackend {
     Auto = 2
 };
 
+enum class BeamSelectionPolicy {
+    Greedy = 0,
+    Diverse = 1
+};
+
+enum class CudaTopKMode {
+    FullSort = 0,
+    Tiled = 1,
+    Cub = 2,
+    CubFallbackFullSort = 3
+};
+
 struct ProgressContext {
     bool enabled = false;
     int case_index = 0;

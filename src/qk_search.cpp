@@ -704,6 +704,52 @@ bool candidate_better(const BeamCandidate& a, const BeamCandidate& b) {
     return a.order < b.order;
 }
 
+struct BeamProgressScore {
+    int total_dist = numeric_limits<int>::max();
+    int max_dist = numeric_limits<int>::max();
+    int misplaced = numeric_limits<int>::max();
+    bool initialized = false;
+};
+
+BeamProgressScore progress_score_from_candidate(const BeamCandidate& candidate) {
+    return {
+        candidate.total_dist,
+        candidate.max_dist,
+        candidate.misplaced,
+        true
+    };
+}
+
+bool progress_score_better(const BeamProgressScore& a, const BeamProgressScore& b) {
+    if (!a.initialized) {
+        return false;
+    }
+    if (!b.initialized) {
+        return true;
+    }
+    if (a.total_dist != b.total_dist) {
+        return a.total_dist < b.total_dist;
+    }
+    if (a.max_dist != b.max_dist) {
+        return a.max_dist < b.max_dist;
+    }
+    return a.misplaced < b.misplaced;
+}
+
+bool candidate_max_distance_better(const BeamCandidate& a, const BeamCandidate& b) {
+    if (a.max_dist != b.max_dist) {
+        return a.max_dist < b.max_dist;
+    }
+    return candidate_better(a, b);
+}
+
+bool candidate_misplaced_better(const BeamCandidate& a, const BeamCandidate& b) {
+    if (a.misplaced != b.misplaced) {
+        return a.misplaced < b.misplaced;
+    }
+    return candidate_better(a, b);
+}
+
 uint64_t perturbation_key(const BeamCandidate& candidate, int depth) {
     uint64_t key =
         candidate.fingerprint.low ^
@@ -714,11 +760,26 @@ uint64_t perturbation_key(const BeamCandidate& candidate, int depth) {
     return splitmix64(key);
 }
 
+template <class Better>
+vector<size_t> candidate_indices_by(const vector<BeamCandidate>& candidates, Better better) {
+    vector<size_t> indices;
+    indices.reserve(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        indices.push_back(i);
+    }
+    stable_sort(indices.begin(), indices.end(), [&](size_t lhs, size_t rhs) {
+        return better(candidates[lhs], candidates[rhs]);
+    });
+    return indices;
+}
+
 vector<BeamCandidate> select_layer_only_retained(
     vector<BeamCandidate>& sorted_candidates,
+    const vector<Edge>& es,
     int beam_width,
     double perturbation_ratio,
-    int depth
+    int depth,
+    BeamSelectionPolicy selection_policy
 ) {
     int perturb_slots = 0;
     if (perturbation_ratio > 0.0) {
@@ -732,6 +793,10 @@ vector<BeamCandidate> select_layer_only_retained(
     vector<char> chosen(sorted_candidates.size(), 0);
     vector<BeamCandidate> retained;
     retained.reserve(static_cast<size_t>(beam_width));
+
+    auto remaining_slots = [&]() -> int {
+        return beam_width - static_cast<int>(retained.size());
+    };
 
     auto keep_index = [&](size_t index) -> bool {
         if (chosen[index]) {
@@ -747,10 +812,103 @@ vector<BeamCandidate> select_layer_only_retained(
         return true;
     };
 
-    for (size_t i = 0;
-         i < sorted_candidates.size() && static_cast<int>(retained.size()) < greedy_slots;
-         ++i) {
-        keep_index(i);
+    auto keep_from_indices = [&](const vector<size_t>& indices, int slots) {
+        int kept = 0;
+        for (size_t index : indices) {
+            if (kept >= slots || remaining_slots() <= 0) {
+                break;
+            }
+            if (keep_index(index)) {
+                kept++;
+            }
+        }
+    };
+
+    if (selection_policy == BeamSelectionPolicy::Diverse && greedy_slots > 0) {
+        int max_dist_slots = greedy_slots * 20 / 100;
+        int misplaced_slots = greedy_slots * 15 / 100;
+        int plain_greedy_slots = greedy_slots * 50 / 100;
+        if (plain_greedy_slots == 0) {
+            plain_greedy_slots = 1;
+        }
+        while (plain_greedy_slots + max_dist_slots + misplaced_slots > greedy_slots) {
+            if (misplaced_slots > 0) {
+                misplaced_slots--;
+            } else if (max_dist_slots > 0) {
+                max_dist_slots--;
+            } else {
+                plain_greedy_slots--;
+            }
+        }
+        int edge_slots = greedy_slots - plain_greedy_slots - max_dist_slots - misplaced_slots;
+
+        for (size_t i = 0;
+             i < sorted_candidates.size() && plain_greedy_slots > 0;
+             ++i) {
+            if (keep_index(i)) {
+                plain_greedy_slots--;
+            }
+        }
+
+        if (max_dist_slots > 0) {
+            vector<size_t> by_max_distance =
+                candidate_indices_by(sorted_candidates, candidate_max_distance_better);
+            keep_from_indices(by_max_distance, max_dist_slots);
+        }
+
+        if (misplaced_slots > 0) {
+            vector<size_t> by_misplaced =
+                candidate_indices_by(sorted_candidates, candidate_misplaced_better);
+            keep_from_indices(by_misplaced, misplaced_slots);
+        }
+
+        if (edge_slots > 0 && !es.empty()) {
+            int max_bit = -1;
+            for (const Edge& edge : es) {
+                max_bit = max(max_bit, edge.bit);
+            }
+            vector<vector<size_t>> by_bit(static_cast<size_t>(max_bit + 1));
+            for (size_t i = 0; i < sorted_candidates.size(); ++i) {
+                int edge_id = sorted_candidates[i].edge_id;
+                if (edge_id >= 0 && edge_id < static_cast<int>(es.size())) {
+                    int bit = es[static_cast<size_t>(edge_id)].bit;
+                    if (bit >= 0 && bit < static_cast<int>(by_bit.size())) {
+                        by_bit[static_cast<size_t>(bit)].push_back(i);
+                    }
+                }
+            }
+
+            vector<size_t> offsets(by_bit.size(), 0);
+            int kept = 0;
+            while (kept < edge_slots && remaining_slots() > 0) {
+                bool made_progress = false;
+                for (size_t bit = 0;
+                     bit < by_bit.size() && kept < edge_slots && remaining_slots() > 0;
+                     ++bit) {
+                    vector<size_t>& bucket = by_bit[bit];
+                    size_t& offset = offsets[bit];
+                    while (offset < bucket.size() && chosen[bucket[offset]]) {
+                        offset++;
+                    }
+                    if (offset < bucket.size()) {
+                        if (keep_index(bucket[offset])) {
+                            kept++;
+                            made_progress = true;
+                        }
+                        offset++;
+                    }
+                }
+                if (!made_progress) {
+                    break;
+                }
+            }
+        }
+    } else {
+        for (size_t i = 0;
+             i < sorted_candidates.size() && static_cast<int>(retained.size()) < greedy_slots;
+             ++i) {
+            keep_index(i);
+        }
     }
 
     if (perturb_slots > 0 && static_cast<int>(retained.size()) < beam_width) {
@@ -789,6 +947,7 @@ vector<BeamCandidate> select_layer_only_retained(
         keep_index(i);
     }
 
+    sort(retained.begin(), retained.end(), candidate_better);
     return retained;
 }
 
@@ -1107,7 +1266,9 @@ PathResult beam_search(
     int layer_visited_window,
     int layer_plateau_limit,
     double layer_perturbation_ratio,
-    BeamCandidateBackend candidate_backend
+    BeamCandidateBackend candidate_backend,
+    CudaTopKMode cuda_topk_mode,
+    BeamSelectionPolicy selection_policy
 ) {
     auto t0 = Clock::now();
     int n = static_cast<int>(init.size());
@@ -1150,7 +1311,7 @@ PathResult beam_search(
     }
 
     long long expanded = 0;
-    int best_seen_total_dist = numeric_limits<int>::max();
+    BeamProgressScore best_seen_score;
     int plateau_depths = 0;
     auto reached_state_count = [&]() -> size_t {
         if (visited_mode == BeamVisitedMode::ExactPacked) {
@@ -1247,7 +1408,11 @@ PathResult beam_search(
                 recent_visited.last_added(),
                 recent_visited.last_add_evicted(),
                 force_recent_rebuild,
-                use_packed_tie_key
+                use_packed_tie_key,
+                cuda_topk_mode,
+                beam_width,
+                layer_perturbation_ratio,
+                selection_policy
             );
             double outer_cuda_call_sec = chrono::duration<double>(
                 Clock::now() - outer_cuda_call_start
@@ -1565,6 +1730,7 @@ PathResult beam_search(
         vector<BeamCandidate> selected;
         if (generated_by_cuda) {
             selected = move(cuda_sorted_candidates);
+            sort(selected.begin(), selected.end(), candidate_better);
         } else {
             selected.reserve(top_candidates.size());
             while (!top_candidates.empty()) {
@@ -1578,9 +1744,11 @@ PathResult beam_search(
         if (layer_only_visited) {
             selected = select_layer_only_retained(
                 selected,
+                es,
                 beam_width,
                 layer_perturbation_ratio,
-                depth
+                depth,
+                selection_policy
             );
         }
         if (cuda_timing_available) {
@@ -1591,9 +1759,9 @@ PathResult beam_search(
 
         bool plateau_reached = false;
         if (layer_only_visited && layer_plateau_limit > 0 && !selected.empty()) {
-            int current_best_total_dist = selected.front().total_dist;
-            if (current_best_total_dist < best_seen_total_dist) {
-                best_seen_total_dist = current_best_total_dist;
+            BeamProgressScore current_score = progress_score_from_candidate(selected.front());
+            if (progress_score_better(current_score, best_seen_score)) {
+                best_seen_score = current_score;
                 plateau_depths = 0;
             } else {
                 plateau_depths++;
@@ -2550,6 +2718,65 @@ BeamCandidateBackend parse_beam_candidate_backend(string value) {
         return BeamCandidateBackend::Auto;
     }
     throw invalid_argument("candidate_backend must be cpu/0, cuda/1, or auto/2");
+}
+
+string cuda_topk_mode_name(CudaTopKMode mode) {
+    switch (mode) {
+        case CudaTopKMode::FullSort:
+            return "full_sort";
+        case CudaTopKMode::Tiled:
+            return "tiled";
+        case CudaTopKMode::Cub:
+            return "cub";
+        case CudaTopKMode::CubFallbackFullSort:
+            return "cub_fallback_full_sort";
+    }
+    return "unknown";
+}
+
+CudaTopKMode parse_cuda_topk_mode(string value) {
+    transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(tolower(ch));
+    });
+    if (value == "0" || value == "full" || value == "full_sort" || value == "sort") {
+        return CudaTopKMode::FullSort;
+    }
+    if (value == "1" || value == "tiled" || value == "tile" || value == "exact_tiled") {
+        return CudaTopKMode::Tiled;
+    }
+    if (value == "2" || value == "cub" || value == "device_topk" || value == "cub_topk") {
+        return CudaTopKMode::Cub;
+    }
+    throw invalid_argument("cuda_topk_mode must be full_sort/0, tiled/1, or cub/2");
+}
+
+string beam_selection_policy_name(BeamSelectionPolicy policy) {
+    switch (policy) {
+        case BeamSelectionPolicy::Greedy:
+            return "greedy";
+        case BeamSelectionPolicy::Diverse:
+            return "diverse";
+    }
+    return "unknown";
+}
+
+BeamSelectionPolicy parse_beam_selection_policy(string value) {
+    transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(tolower(ch));
+    });
+    if (value == "0" || value == "greedy" || value == "legacy") {
+        return BeamSelectionPolicy::Greedy;
+    }
+    if (
+        value == "1" ||
+        value == "diverse" ||
+        value == "diversity" ||
+        value == "island" ||
+        value == "islands"
+    ) {
+        return BeamSelectionPolicy::Diverse;
+    }
+    throw invalid_argument("beam_selection_policy must be greedy/0 or diverse/1");
 }
 
 } // namespace qk

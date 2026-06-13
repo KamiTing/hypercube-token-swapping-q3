@@ -1,2 +1,0 @@
-completed_case,total_cases,dim,case_name,total_dist,strong_lb,exact_status,exact_steps,exact_sec,exact_path_valid,beam_visited_mode,beam_status,beam_steps,beam_sec,beam_path_valid,optimized_status,optimized_steps,optimized_improvement,optimized_word_reductions,optimized_sec,optimized_path_valid,batcher_success,batcher_swaps,batcher_sec,batcher_path_valid,elapsed_sec
-1,1,10,"q10_case1",5120,2560,skipped,-1,0.000000,0,layer_only,solved,3308,712.811686,1,disabled,3308,0,0,0.000000,0,1,13998,0.000502,1,712.998518

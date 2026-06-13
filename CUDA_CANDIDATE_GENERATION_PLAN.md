@@ -502,11 +502,12 @@ Added a follow-up overhead fix on 2026-06-12:
   - `outer_layer_sec`
 - CPU perturbation selection now uses a heap to read choices in the same deterministic key order without sorting the whole choice list.
 - An exact GPU Top-K replacement was attempted with `thrust::nth_element` / `thrust::partial_sort`, but the local CUDA 13.3 CCCL/Thrust headers do not expose those algorithms.
-- Added selectable CUDA Top-K modes on 2026-06-12:
-  - default `full_sort`: original full `thrust::sort` path.
-  - `QK_CUDA_TOPK_MODE=tiled`: exact tiled sort scaffold. Each tile keeps K candidates, then CPU merges tile Top-K lists exactly. This is correctness scaffolding and can be slower because it copies K candidates per tile.
-  - `QK_CUDA_TOPK_MODE=cub`: exact CUB prefix-filter path. CUB `DeviceTopK::MinPairs` finds a prefix threshold, then all candidates with `prefix_key <= threshold` are selected, copied back, sorted with the original full comparator, and trimmed to K. If the prefix tie set is too large, the mode falls back to full sort.
-  - `QK_CUDA_TOPK_TIE_CAP` controls the maximum selected prefix-tie set before CUB mode falls back to full sort. Default is `max(8 * layer_pool_width, 1048576)`.
+- Added selectable CUDA Top-K modes:
+  - Runtime CLI argument: `cuda_topk_mode=full_sort|tiled|cub`, after `beam_selection_policy`.
+  - default `cub`: CUB `DeviceTopK::MinPairs` finds a prefix threshold. If the prefix tie set is too large, a second GPU Top-K over fingerprint-high narrows the tie before copying the reduced set to CPU for exact comparator sorting.
+  - `full_sort`: original full `thrust::sort` path, kept for diagnostics and fallback.
+  - `tiled`: exact tiled sort scaffold. Each tile keeps K candidates, then CPU merges tile Top-K lists exactly. This is correctness scaffolding and can be slower because it copies K candidates per tile.
+  - `QK_CUDA_TOPK_TIE_CAP` controls the maximum selected prefix/refined tie set before CUB mode falls back to full sort. Default is `max(8 * layer_pool_width, 1048576)`.
 - `qk_cuda_timing.csv` now reports `topk_mode`, `topk_tiles`, `topk_tile_candidates`, and `topk_select_sec`.
   - `topk_mode=0`: full sort.
   - `topk_mode=1`: tiled exact Top-K.
@@ -551,7 +552,7 @@ The Q10 depth-300 curves match exactly, so the CUB prefix-filter path did not ch
 
 MVP limits:
 
-- The CUDA backend currently supports Q9+ layer-only mode only; Q8 and below still need packed-key tie ordering for exact CPU parity.
+- The CUDA backend now supports explicit `candidate_backend=cuda` for layer-only Q4+ runs. Q8 and below use fingerprint tie ordering on CUDA instead of CPU exact packed-key tie ordering, so exact CPU order parity is intentionally not guaranteed for those small-Q comparison runs.
 - The CUDA source uses persistent layer buffers plus selectable Top-K backends. The old 16M hard failure cap has been replaced by chunked exact Top-K.
 - Full `qk_special_cases` CUDA linking through CMake is still not validated because `cmake` is not on PATH. The current validated Windows CUDA build uses `nvcc` with MSVC Build Tools and a local SQLite stub for unused disk-mode symbols; CUDA runs must use `layer_only`, not `fingerprint128_disk`.
 - CUDA progress timing is written to `qk_cuda_timing.csv`.

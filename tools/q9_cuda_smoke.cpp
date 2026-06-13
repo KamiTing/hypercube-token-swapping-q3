@@ -158,7 +158,16 @@ int main(int argc, char** argv) {
             pool_width,
             candidate_order,
             recent,
-            false
+            recent.size(),
+            static_cast<uint64_t>(depth),
+            recent,
+            false,
+            true,
+            false,
+            CudaTopKMode::Cub,
+            beam_width,
+            0.10,
+            BeamSelectionPolicy::Diverse
         );
         auto t1 = chrono::steady_clock::now();
         if (!result.used_cuda) {

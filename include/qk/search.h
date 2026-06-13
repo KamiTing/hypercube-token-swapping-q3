@@ -36,7 +36,9 @@ PathResult beam_search(
     int layer_visited_window = 0,
     int layer_plateau_limit = 0,
     double layer_perturbation_ratio = 0.0,
-    BeamCandidateBackend candidate_backend = BeamCandidateBackend::Cpu
+    BeamCandidateBackend candidate_backend = BeamCandidateBackend::Cpu,
+    CudaTopKMode cuda_topk_mode = CudaTopKMode::Cub,
+    BeamSelectionPolicy selection_policy = BeamSelectionPolicy::Greedy
 );
 
 PathResult beam_search_disk(
@@ -61,5 +63,9 @@ std::string beam_visited_mode_name(BeamVisitedMode mode);
 BeamVisitedMode parse_beam_visited_mode(std::string value);
 std::string beam_candidate_backend_name(BeamCandidateBackend backend);
 BeamCandidateBackend parse_beam_candidate_backend(std::string value);
+std::string cuda_topk_mode_name(CudaTopKMode mode);
+CudaTopKMode parse_cuda_topk_mode(std::string value);
+std::string beam_selection_policy_name(BeamSelectionPolicy policy);
+BeamSelectionPolicy parse_beam_selection_policy(std::string value);
 
 } // namespace qk

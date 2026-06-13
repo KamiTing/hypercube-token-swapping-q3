@@ -25,7 +25,11 @@ CudaLayerGenerationResult generate_layer_only_candidates_cuda(
     const vector<Fingerprint128>&,
     bool,
     bool,
-    bool
+    bool,
+    CudaTopKMode,
+    int,
+    double,
+    BeamSelectionPolicy
 ) {
     return {
         false,

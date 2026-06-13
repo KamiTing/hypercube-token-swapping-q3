@@ -1,323 +1,94 @@
-﻿# Q3-Q10 Hypercube Token Swapping
+﻿# Qk Special-Case Hypercube Token Swapping
 
-這個專案實作並驗證 hypercube 上的 zero-buffer token swapping，範圍包含：
+本分支目前的主軸是 `Qk` hypercube 上的 special-case token swapping solver。它不再是 Q3/Q4 隨機 benchmark 的主要分支，而是用來維護 Q4 以上指定 permutation、Beam Search、CUDA candidate generation、完整路徑輸出與正式結果紀錄。
 
-- **Minimum Token Swapping on Q3 Hypercube**
-- **Zero-buffer edge-swap routing shortest path**
-- **Q4 full-random benchmark**
-- **Q4-Q10 special-case Beam Search**
+目前工作分支：
 
-在三維超立方體 `Q3`（8 個節點）上，每一步只能沿合法邊交換兩端 token，目標是將任意初始 permutation 轉為 `(0,1,2,3,4,5,6,7)` 並最小化交換步數。
+- `codex/sp`：本 README 對應的 special-case / CUDA Beam 分支。
+- `codex/q4-random-test`：Q4 full-random benchmark 已有自己的分支；本分支只保留一份歷史 Q4 random output 作為參考。
+
+## 目前狀態
+
+截至 `2026-06-13`，本分支的正式狀態如下：
+
+| 範圍 | 狀態 | 主要資料來源 |
+|---|---|---|
+| Q4 custom cases | 24/24 solved | `output/q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055/` |
+| Q5-Q11 special cases | 每個維度 2/2 solved | 同上 |
+| Q12 | `q12_case1` solved，`q12_case2` 尚未列為正式完成 | `output/q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_20260613_132118/` |
+| Q13-Q14 | cases 已加入 `custom_qk_cases.csv`，尚未正式完成 | `custom_qk_cases.csv` |
+| Q15 | 1 個 case 已加入，尚未正式完成 | `custom_qk_cases.csv` |
+| 完整路徑 Excel | Q4-Q12 分頁已建立，Q12 目前只有 `q12_case1` | `output/qk_special_cases_routes.xlsx` |
+
+`custom_qk_cases.csv` 目前包含：
+
+| Dimension | Case count |
+|---|---:|
+| Q4 | 24 |
+| Q5-Q14 | 2 each |
+| Q15 | 1 |
+
+結果目錄的保留規則與目前官方資料來源整理在 [QK_RESULTS_INDEX.md](QK_RESULTS_INDEX.md)。
 
 ## 問題模型
 
-- 節點：`0..7`，對應 3-bit binary label。
-- 邊：兩節點 binary 只差 1 bit 才有邊。
-- 狀態表示：`state[node] = token`。
-- 操作：每次只能做一條 hypercube 邊上的 swap。
+對於 `Qd` hypercube：
 
-這符合 zero-buffer routing：沒有額外暫存、沒有 token 疊放。
+- 節點數：`N = 2^d`
+- 節點 label：`0..N-1`
+- 合法邊：兩個節點的 binary label 只差 1 bit
+- 狀態：`state[node] = token`
+- 目標：identity permutation，也就是 `state[i] = i`
+- 操作：每一步只能沿一條 hypercube edge swap 兩端 token
 
-## 方法
+這是 zero-buffer token swapping：沒有額外暫存節點，沒有 token 疊放。
 
-- **BFS**：真值表（最短步數 baseline）
-- **A\***：精確搜尋（admissible heuristic）
-- **Beam Search**：heuristic 搜尋
-- **Batcher baseline**：固定 compare-exchange sorting-network
+## 程式模組
 
-A\* heuristic：
+核心 special-case solver 位於 `include/qk/` 與 `src/qk_*.cpp`：
 
-`h(state) = ceil(total_hamming_distance(state) / 2)`
+| 模組 | 責任 |
+|---|---|
+| `qk_common` | state、edge、swap step、fingerprint、packed key |
+| `qk_hypercube` | hypercube edges、distance、lower bound、path replay validation |
+| `qk_search` | Strong A*、Beam Search、disk visited、layer-only visited、path back-pointer |
+| `qk_cuda_candidate_generator` | CUDA layer-only candidate generation、CUB Top-K、GPU diverse preselection |
+| `qk_batcher` | deterministic Batcher baseline |
+| `qk_cases` | built-in cases 與 `custom_qk_cases.csv` parser |
+| `qk_io` | CSV escaping、progress output、path formatting |
+| `qk_path_optimizer` | 已保留的 path post-processing 工具，目前正式結果未啟用 |
+| `qk_special_cases.cpp` | CLI、runner、CSV output、overall orchestration |
 
-因為一次 swap 最多讓兩個 token 各靠近目標一步，所以總距離最多下降 2，故此 heuristic 不高估。
+Q3 baseline 與 Q4 random benchmark 的舊程式仍在 repository 中，但不再是本分支 README 的主體。
 
-## Beam Search 設計重點
+## Lower Bound
 
-### 核心概念
-
-Greedy search 每一步只保留單一路徑，容易因為局部最佳而繞路。  
-Beam Search 改為「逐層保留多條高分候選路徑」：每層展開後只留下前 `beam_width` 個狀態，兼顧效率與穩定性。
-
-本專案設定：
-
-- `BEAM_WIDTH = 14`
-- `MAX_DEPTH = 12`
-
-### 狀態與候選資訊
-
-每個候選節點（`BeamItem`）保存：
-
-- `state`：目前排列
-- `depth`：已使用交換步數
-- `last_edge_id`：上一條交換邊（避免立即反悔）
-- `used_edges`：每條邊已使用次數（用於重複邊懲罰）
-
-### 每層展開方式
-
-對當前 beam 內每個狀態，嘗試所有合法 hypercube 邊交換，產生下一層候選：
-
-`next_state = swap_nodes(state, e.u, e.v)`
-
-Q3 共有 12 條邊，因此每個狀態每層最多展開 12 個候選（扣除剪枝與禁忌邊）。
-
-### 去重與剪枝
-
-使用 `visited_best_depth[state]` 記錄狀態最早到達深度。若新路徑深度不更好則略過，避免重複搜尋與無效繞圈。
-
-另外，`last_edge_id` 會阻止「立刻用同一條邊反向交換」的無效動作。
-
-### 評分函數（排序優先序）
-
-候選依 `BeamScore` 做 tuple-like 比較，越小越優先，依序為：
-
-1. `total_dist`：所有 token 到目標的總 Hamming distance
-2. `misplaced`：錯位 token 數
-3. `max_dist`：最遠 token 距離
-4. `repeat_penalty`：重複使用邊的懲罰
-5. `-improvement`：本步對總距離改善量（改善越大越優）
-6. `-local_improvement`：被交換兩個 token 的局部改善量
-7. `-dir_score`：維度方向偏好（熱門修正 bit 方向優先）
-8. `-touched_max_dist`：優先處理較遠 token
-9. `depth`：平手時偏好較淺層路徑
-
-### 終止條件
-
-- 初始即目標：回傳 `0`
-- 生成候選時到達目標：回傳當前 `depth`
-- 搜尋達 `MAX_DEPTH`：停止並回傳失敗（`-1`）
-
-### 方法定位
-
-Beam Search 是 heuristic search，理論上不保證 optimal；但在本專案 Q3 全排列（40320 states）測試中，使用上述評分與參數可達成與 BFS true table 完全一致的最短步數結果。
-
-## 實驗範圍
-
-- 全排列測試：`8! = 40320` states。
-- 對每個初始狀態計算到目標狀態的步數，並比較不同方法。
-
-## 目前參數（推薦）
-
-在本專案目前實作下，經全狀態掃描回推：
-
-- `BEAM_WIDTH = 14`
-- `MAX_DEPTH = 12`
-
-這組在 Q3 上可維持與 BFS 一致的最優結果，且比寬鬆設定（例如 100/30）更快。
-
-## 專案結構
+程式輸出的 `strong_lb` 由下列三個 lower bounds 取最大值，再做 permutation parity 調整：
 
 ```text
-.
-├── include/
-│   ├── config.h
-│   ├── hypercube.h
-│   ├── search.h
-│   ├── batcher.h
-│   ├── report.h
-│   └── qk/
-│       ├── common.h
-│       ├── hypercube.h
-│       ├── search.h
-│       ├── batcher.h
-│       ├── cases.h
-│       └── io.h
-├── src/
-│   ├── main.cpp
-│   ├── hypercube.cpp
-│   ├── search.cpp
-│   ├── batcher.cpp
-│   ├── report.cpp
-│   ├── qk_common.cpp
-│   ├── qk_hypercube.cpp
-│   ├── qk_search.cpp
-│   ├── qk_batcher.cpp
-│   ├── qk_cases.cpp
-│   ├── qk_io.cpp
-│   └── qk_special_cases.cpp
-├── output/
-│   ├── q4_path_selected_10000_basic_no_path_20260604_205233/
-│   ├── qk_custom_cases_20260605_133247/
-│   ├── q8_case1_trim_20260605_154219/
-│   ├── q8_case2_trim_20260605_154927/
-│   ├── q9_case1_disk_bw256_20260607_113040/
-│   ├── q9_case2_disk_bw256_path_20260609_170556/
-│   └── qk_special_cases_routes.xlsx
-├── tools/
-│   └── build_qk_special_cases_workbook.mjs
-├── custom_qk_cases.csv
-├── Q9_BEAM_SEARCH_EVOLUTION.md
-├── legacy/
-│   └── hypercube_test.cpp
-├── plot_distribution.py
-└── CMakeLists.txt
+basic_lb = ceil(total_hamming_distance / 2)
+max_packet_distance = max token-to-target Hamming distance
+cycle_lower_bound = N - number_of_cycles
+strong_lb = parity_adjust(max(basic_lb, max_packet_distance, cycle_lower_bound))
 ```
 
-## 建置與執行
+`parity_adjust` 會把 lower bound 調整到與 permutation parity 相同的步數奇偶性。這是 lower bound，不代表 Beam 必須接近它才算正常；Q12 目前仍明顯超過 lower bound，表示搜尋仍有改進空間。
 
-### 1) 編譯 C++ 主程式（MinGW g++）
+## 搜尋方法
 
-```powershell
-g++ -std=c++17 -O2 -fopenmp src/main.cpp src/hypercube.cpp src/search.cpp src/batcher.cpp src/report.cpp -Iinclude -o hypercube_refactor.exe
-```
+### Strong A*
 
-### 2) 執行實驗
+`astar_exact()` 使用 `strong_lb` 作為 heuristic，可在小維度做精確驗證。實務上本分支主要只讓 Q4 以內使用 exact search；Q5 以上狀態空間過大，正式 special-case run 以 Beam 與 Batcher 為主。
 
-```powershell
-.\hypercube_refactor.exe
-```
+### Batcher Baseline
 
-輸出會寫入 `output/`：
+`batcher_baseline()` 是 deterministic compare-exchange routing baseline。它通常一定能產生合法路徑，但 swap 數遠高於 Beam。它的定位是穩定 baseline，不是最佳化搜尋。
 
-- `output/hypercube_report.txt`
-- `output/step_distribution.csv`
+### Beam Search
 
-### 3) 產生統計表與圖
+Beam 是目前主 solver。每一層從 retained beam states 出發，嘗試所有 hypercube edge swap，產生下一層 candidates，然後保留有限數量的候選繼續搜尋。
 
-```powershell
-.\.venv\Scripts\python.exe plot_distribution.py
-```
-
-會產生：
-
-- `output/step_distribution_summary.csv`
-- `output/bfs_step_distribution.png`
-- `output/method_step_distribution_compare.png`
-
-## 主要結果摘要（Q3 全測）
-
-- A\* 與 BFS 全部一致（40320/40320）。
-- Beam（14/12）與 BFS 全部一致（40320/40320）。
-- Batcher baseline 可解但非最短路，最優率約 `1.87%`。
-
-## Q4 完全隨機測試
-
-Q4 (`DIM=4`) full-random benchmark 的每個 case 由 Fisher-Yates shuffle 均勻抽樣自全部 `16!` token placements，不使用從目標狀態 random walk 的 `scramble_steps`。
-
-- 程式：`src/q4_random_benchmark.cpp`
-- 可視化：`plot_q4_random.py`
-- 比較方法：Basic A*、Strong A*、Beam Search、Batcher's baseline
-
-Basic A* heuristic：
-
-`h_basic = ceil(total_hamming_distance / 2)`
-
-Strong A* heuristic：
-
-`h_strong = parity_adjust(max(ceil(total_hamming_distance / 2), max_packet_distance, cycle_lower_bound))`
-
-其中 `cycle_lower_bound = N - number_of_cycles`，`parity_adjust` 會將 lower bound 調整到與目前 permutation parity 相同的步數奇偶性。
-
-### 執行 Q4 benchmark
-
-```powershell
-g++ -std=c++17 -O2 src/q4_random_benchmark.cpp -o q4_random_benchmark_run.exe
-.\q4_random_benchmark_run.exe 10000 128 30 42 0 1 1 output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
-```
-
-參數順序：
-
-- `samples beam_width max_depth seed astar_cap parallel_methods record_paths [output_dir]`
-- `astar_cap = 0` 表示不限制 A* visited-state 數量
-- `parallel_methods = 1` 表示同一個 case 的四種方法用平行執行
-- `record_paths = 1` 會輸出 detailed routing paths；若大型測試要節省記憶體可設為 `0`
-- 為了避免 Q4 hard case 的記憶體爆量，Basic A* 不輸出 path；`astar_path` 會留空，只保留 `astar_steps`、expanded nodes 與時間。Strong A*、Beam、Batcher 會輸出完整 path。
-- `output_dir` 可省略；預設為 `output`。建議 path-enabled 測試指定獨立資料夾，避免覆蓋既有大型 benchmark。
-
-### 產生 Q4 圖表
-
-```powershell
-.\.venv\Scripts\python.exe plot_q4_random.py output\q4_path_selected_10000_basic_no_path_YYYYMMDD_HHMMSS
-```
-
-### Q4 輸出檔案
-
-- `output_dir/q4_random_benchmark.csv`
-- `output_dir/q4_random_routing_paths.csv`
-- `output_dir/q4_random_summary.csv`
-- `output_dir/q4_steps_hist_compare.png`
-- `output_dir/q4_time_boxplot.png`
-- `output_dir/q4_gap_vs_batcher_hist.png`
-
-`q4_random_routing_paths.csv` 是逐 selected permutation 的 detailed routing path 紀錄。每列包含初始 state、Basic A*/Strong A*/Beam/Batcher 的步數；其中 Basic A* 的 `astar_path` 為空，Strong A*、Beam、Batcher 會輸出實際 edge-swap sequence。Q4 節點包含 `10..15`，因此路徑格式使用 `u-v`，例如 `0-1 10-14`。
-
-### 目前大型測試（10000 full-random samples）
-
-- 輸出資料夾：`output/q4_path_selected_10000_basic_no_path_20260604_205233`
-- `beam_width=128, max_depth=30, seed=42, astar_cap=0, parallel_methods=1, record_paths=1`
-- `elapsed = 11295s`
-- `Basic A* failures = 0/10000`
-- `Strong A* failures = 0/10000`
-- `Beam failures = 0/10000`
-- `Batcher failures = 0/10000`
-- `Basic A* and Strong A* same steps = 10000/10000`
-- `Strong A* expanded <= Basic A* = 8747/10000`
-- `Basic A* avg steps = 17.1852`
-- `Strong A* avg steps = 17.1852`
-- `Beam avg steps = 17.2270`
-- `Batcher avg swaps = 39.9200`
-- `Basic A* avg expanded = 87167.9328`
-- `Strong A* avg expanded = 4287.0348`
-- `Beam avg expanded = 48680.0116`
-- `Basic A* avg sec = 0.841673`
-- `Strong A* avg sec = 0.073471`
-- `Beam avg sec = 0.018573`
-- `Batcher avg sec = 0.000022`
-- `avg case wall sec = 1.129430`
-- Routing path 驗證：`astar_path` 全部留空；Strong A*、Beam、Batcher path 皆抵達 Q4 goal，且 path 長度與 step/swap 欄位一致。
-
-### 測試數據分析
-
-1. Strong A* 保持與 Basic A* 相同步數。
-在 10000 筆 full-random case 中，兩者皆成功且 `10000/10000` 步數一致；因兩者都是 admissible A*，這代表目前樣本中 Strong heuristic 沒有改變 optimal 解，只降低搜尋成本。
-
-2. Strong heuristic 明顯減少展開量。
-平均 expanded nodes 從 `87167.9328` 降到 `4287.0348`，約為 `20.3x` 展開量改善；平均時間從 `0.841673s` 降到 `0.073471s`，約為 `11.5x` 改善。
-
-3. Beam 仍是最快的 heuristic search。
-Beam 平均 `0.018573s`，但它是剪枝式 heuristic，不保證 optimal；本次 `10000/10000` 皆成功，平均步數 `17.2270`，略高於 Basic A*/Strong A* 的 `17.1852`。
-
-4. Batcher baseline 速度最快但交換次數最多。
-Batcher 是固定 compare-exchange network，不做搜尋；平均 `39.9200` swaps，約為 Strong A* 平均最短步數的 `2.32x`。
-
-5. 研究定位。
-Basic A* 與 Strong A* 都是使用 admissible heuristic 的 A* 變體；Beam 適合作為快速 heuristic baseline；Batcher 適合作為 deterministic routing baseline。
-
-備註：輸出 CSV 中的 `astar_*` 欄位對應 Basic A*。
-
-## Q4-Q10 Special Cases（`codex/sp`）
-
-SP 分支加入模組化的 `qk` special-case runner，用來執行 Q4 以上指定 permutation。Q4 可執行 Strong A* 精確驗證；Q5 以上只跑 Beam Search 與 Batcher baseline，避免 Basic A* 的狀態空間爆炸。
-
-重構後的 special-case runner 分成：
-
-- `qk_common`：共用 state、swap、fingerprint 與 packed key。
-- `qk_hypercube`：hypercube edges、distance、lower bound 與 path validation。
-- `qk_search`：Strong A*、Beam Search、RAM fingerprint visited、SQLite disk fingerprint visited、layer-only RAM Beam。
-- `qk_batcher`：Batcher baseline。
-- `qk_cases`：內建 case、custom CSV parsing 與 permutation validation。
-- `qk_io`：CSV escaping、progress display 與記憶體整理 helper。
-- `qk_special_cases.cpp`：CLI 參數、輸出檔案與整體 runner 流程。
-
-`custom_qk_cases.csv` 目前包含 Q4-Q15 special cases；Q15 只有一個 case，其餘 Q4-Q14 各有兩個 case。正式保存到路徑 Excel 的最新大型結果是 Q10 case1。
-
-### Beam visited 模式
-
-程式保留四種 visited 實作，可由命令列選擇：
-
-| 模式 | 說明 |
-|---|---|
-| `exact` | 保存完整 packed state，適用 Q1-Q8 |
-| `fingerprint128` | 128-bit fingerprint 保存在 RAM |
-| `fingerprint128_disk` | 128-bit fingerprint 分批保存在 SQLite |
-| `layer_only` | 只保留當前 Beam 與前 K 層 retained fingerprints，不保存全域 visited set |
-
-Q9 使用 `fingerprint128_disk`。Bloom filter 只負責快速判斷「一定沒出現過」；若可能存在，仍會檢查 RAM pending set 與 SQLite primary key，因此 Bloom false positive 不會直接刪除候選。
-
-Q10 case1 使用 `layer_only`。這個模式把 RAM 用在「近期 retained layer fingerprint window」與 per-layer candidate pool，不建立 SQLite visited database，也不記錄 candidate trace。完整 path 仍以 parent back-pointer 寫入暫存 path store，找到解後再回溯重建。
-
-### Beam 簡化排序
-
-目前 `qk_special_cases` 保留的是 Q8/Q9 成功使用的簡化 Beam 排序。每一層候選先依下列欄位由小到大保留前 `beam_width` 個：
+候選排序的主要分數是：
 
 ```text
 total_dist
@@ -325,43 +96,93 @@ max_dist
 misplaced
 depth
 edge_id
-packed_key / fingerprint / order
+fingerprint / packed key / generation order
 ```
 
-這版不再使用舊 Beam 的九欄 tie-breaker，例如 `repeat_penalty`、`improvement`、`local_improvement`、`dir_score`、`touched_max_dist`。這樣做的重點是降低 per-candidate 狀態與路徑歷史成本，讓 Q8-Q10 可以搭配 fingerprint visited、disk visited 或 layer-only window 穩定執行。排序本身仍是 heuristic Beam，不保證最短路徑；正確性由最後輸出的 path replay 驗證。
+這是 heuristic search，不保證 optimal。所有正式結果都會做 path replay 驗證，確認每一步都是合法 hypercube edge swap，且最終抵達 identity。
 
-### Q9/Q10 記憶體與平行化改進
+## Beam Visited Modes
 
-- Path 使用 parent back-pointer，只在找到解時 backtracking 重建。
-- Fingerprint 可在 swap 後 O(1) 增量更新。
-- Total distance、misplaced count 與 max distance 使用增量計算。
-- 每層只替最後保留的 Beam candidates 建立完整 512-token state。
-- Visited fingerprints 分成 16 個 SQLite shards。
-- 24 workers 平行產生候選與執行分片查重。
-- Candidate array 使用固定 parent/edge index，最後依原始順序提交，保持決定性搜尋順序。
-- 程序在 Windows 使用 `BelowNormal` priority，降低對前景操作的影響。
-- 正式 Q9 run 關閉 candidate trace，只保留深度進度、磁碟進度與最終 path。
-- Q10 RAM run 使用 `layer_only`，保留前 K 層 retained fingerprints，並以 deterministic perturbation 從 candidate pool 中抽取少量候選，增加搜尋多樣性。
+CLI 參數 `beam_visited_mode` 目前支援四種模式：
 
-完整設計與驗證紀錄請參考 [Q9_BEAM_SEARCH_EVOLUTION.md](Q9_BEAM_SEARCH_EVOLUTION.md)。
+| 模式 | 用途 |
+|---|---|
+| `exact` | 儲存完整 packed state，適合 Q8 以內 |
+| `fingerprint128` | 128-bit fingerprint 儲存在 RAM |
+| `fingerprint128_disk` | 128-bit fingerprint 分片寫入 SQLite，曾用於 Q9 舊正式解 |
+| `layer_only` | 只保留當前 beam 與前 K 層 retained fingerprints，不保存全域 visited set |
 
-### 編譯 special-case runner
+目前 CUDA 與高維測試都以 `layer_only` 為主。這個模式的重點是：
 
-直接使用 MinGW g++：
+- 不建立 SQLite visited database。
+- `qk_beam_candidate_trace.csv` 通常設為 0 bytes，避免巨量 I/O。
+- path 以 parent back-pointer 記錄，搜尋結束後才回溯完整路徑。
+- `layer_visited_window` 控制前 K 層 retained fingerprints 的近期去重。
+- `layer_pool_width` 控制每層先保留的 candidate pool，再降到 `beam_width`。
+- `layer_perturbation_ratio` 用 deterministic perturbation 保留一部分非 greedy 候選，降低 tail 階段卡在 local best 的機率。
+
+## CUDA Backend
+
+CUDA backend 是 `layer_only` Beam 的候選產生加速器，不是獨立 solver。
+
+目前真實分工是：
+
+- GPU：candidate generation、score 計算、近期 fingerprint table 檢查、CUB DeviceTopK preselection。
+- GPU：`diverse` policy 下可做多個 key mode 的 Top-K preselection，包括 greedy、max-distance、misplaced、edge-bit 與 perturbation。
+- CPU：最後小集合的 exact comparator 精排、retained 去重、parent path node 寫入與 retained state materialize。
+
+所以 `candidate_backend=cuda` 代表候選產生和 Top-K 前段會用 CUDA；它不代表整個 Beam layer 完全不經 CPU。
+
+`cuda_topk_mode`：
+
+| 模式 | 說明 |
+|---|---|
+| `cub` | 目前推薦；使用 CUB DeviceTopK 與 refined tie handling |
+| `tiled` | 分 tile 選候選後 CPU merge，主要保留作比較 |
+| `full_sort` | 舊版整層 GPU full sort，現在主要作診斷或 fallback |
+
+在 timing CSV 中：
+
+- `topk_mode=2` 代表 CUB/refined Top-K，是目前期待狀態。
+- `topk_mode=0` 代表 full sort，通常不希望在大型正式 run 中出現。
+- `outer_layer_sec` 是整個 Beam layer 的 wall time，包含 GPU call、CPU retained selection、materialize、progress write 等。
+
+## 建置方式
+
+### CPU / disk mode build
+
+需要 C++17、Threads、SQLite3。MinGW 範例：
 
 ```powershell
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -Iinclude `
   src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp `
   src\qk_search.cpp src\qk_cuda_candidate_generator.cpp `
-  src\qk_batcher.cpp src\qk_cases.cpp `
+  src\qk_path_optimizer.cpp src\qk_batcher.cpp src\qk_cases.cpp `
   src\qk_special_cases.cpp -lsqlite3 -o qk_special_cases.exe
 ```
 
-或透過 CMake 建置 `qk_special_cases` target。CMake 需要 `Threads` 與 `SQLite3`。
+這個 build 適合 CPU Beam、`fingerprint128_disk` 與 SQLite visited runs。
 
-CUDA candidate generation 目前是可選 backend，預設不啟用。CMake 可用 `-DQK_ENABLE_CUDA=ON` 編進 `src/qk_cuda_candidate_generator.cu`；執行時用最後一個參數 `candidate_backend=cpu|cuda|auto` 選擇。`cpu` 是預設值，`auto` 在無 CUDA build 或不支援的 Q8 以下 case 會回到 CPU；`cuda` 目前只允許 Q9 以上的 `layer_only`、`candidate_trace_mode=0` 路徑，因為 Q8 以下仍需要 packed-key tie ordering 才能保證和 CPU 完全同序。CUDA backend 會依可用 VRAM 分 chunk 產生候選，每個 chunk 在 GPU 排序後只回傳 top candidates，再用同一排序規則合併，因此不再受舊版 16M candidates 單層 buffer 限制。測試或調參時可用環境變數 `QK_CUDA_CHUNK_CANDIDATES` 指定每個 chunk 的 logical candidate 數。
+### CUDA layer-only build
 
-### 命令列參數
+Windows 上目前驗證過的直接 build 方式如下。這會輸出 `output\qk_special_cases_cuda.exe`：
+
+```powershell
+cmd.exe /d /s /c '"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && nvcc -std=c++17 -DQK_ENABLE_CUDA=1 -Itools -Iinclude -Xcompiler "/EHsc /utf-8 /Zc:preprocessor" src\qk_common.cpp src\qk_hypercube.cpp src\qk_io.cpp src\qk_search.cpp src\qk_cuda_candidate_generator.cu src\qk_path_optimizer.cpp src\qk_batcher.cpp src\qk_cases.cpp src\qk_special_cases.cpp tools\sqlite3_stub.cpp -o output\qk_special_cases_cuda.exe'
+```
+
+這個 direct CUDA build 使用 `tools\sqlite3_stub.cpp`，目標是跑 `layer_only` CUDA，不適合拿來跑 `fingerprint128_disk`。
+
+CMake 也保留 `QK_ENABLE_CUDA`：
+
+```powershell
+cmake -S . -B build -DQK_ENABLE_CUDA=ON
+cmake --build build --config Release --target qk_special_cases
+```
+
+## CLI 參數
+
+`qk_special_cases` 參數順序：
 
 ```text
 qk_special_cases.exe
@@ -376,120 +197,170 @@ qk_special_cases.exe
   [layer_pool_width=0] [layer_visited_window=0]
   [layer_restart_max_width=0] [layer_plateau_limit=0]
   [layer_restart_growth=2] [layer_perturbation_ratio=0.0]
-  [candidate_backend=cpu]
+  [candidate_backend=cpu] [beam_selection_policy=greedy] [cuda_topk_mode=cub]
 ```
 
-`candidate_trace_mode`：
+常用值：
 
-- `0`：不記錄 candidates
-- `1`：只記錄 retained Beam
-- `2`：記錄所有新 candidates
+- `candidate_trace_mode=0`：正式大型 run 使用，不記錄 candidates。
+- `case_name_filter=-`：不過濾 case。
+- `exact_max_dim=0`：完全不跑 Strong A*，只跑 Beam 與 Batcher。
+- `candidate_backend=cuda`：強制使用 CUDA backend，若 binary 不支援 CUDA 會直接失敗。
+- `beam_selection_policy=diverse`：使用多樣性 retained selection。
 
-### 最終 Q9 指令
+## 正式 Run 範例
 
-```powershell
-.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
-  output\q9_case1_disk_bw256_20260607_113040 `
-  .\custom_qk_cases.csv 0 q9_case1 `
-  fingerprint128_disk 24 1024 1000000 16
+### Q4-Q11 CUDA all-run
 
-.\qk_special_cases.exe 9 9 256 4608 0 2000000 30 `
-  output\q9_case2_disk_bw256_path_20260609_170556 `
-  .\custom_qk_cases.csv 0 q9_case2 `
-  fingerprint128_disk 24 1024 1000000 16
-```
-
-### Q10 case1 layer-only RAM 指令
-
-Q10 case1 使用 `beam_width=512`、`layer_pool_width=4096`、`layer_visited_window=4096`、`layer_restart_max_width=512`、`layer_plateau_limit=512`、`layer_perturbation_ratio=0.10`。這輪不使用 SQLite visited database，`qk_beam_candidate_trace.csv` 維持 0 bytes。
+目前 Q4-Q11 官方比較資料來自這組設定：
 
 ```powershell
-.\qk_special_cases.exe 10 10 512 0 0 2000000 30 `
-  output\q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936 `
-  .\custom_qk_cases.csv 0 q10_case1 `
+.\output\qk_special_cases_cuda.exe 4 11 512 0 0 2000000 30 `
+  output\q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_YYYYMMDD_HHMMSS `
+  .\custom_qk_cases.csv 0 - `
   layer_only 24 1024 1000000 16 `
   0 1 200000 0.25 24 0 1 `
-  4096 4096 512 512 2 0.10
+  65536 65536 2048 2048 2 0.10 cuda diverse cub
 ```
 
-### Special-case 結果
+### Q12 case1 CUDA GPU-retained run
 
-所有下列 Beam 與 Batcher path 均通過 hypercube edge replay 驗證：
+Q12 case1 目前正式結果使用較大的 pool：
 
-| Dimension | Case | Strong LB | Beam steps | Expanded | Beam sec | Batcher swaps |
-|---|---|---:|---:|---:|---:|---:|
-| Q5 | case1 | 40 | 42 | 738,848 | 0.592 | 124 |
-| Q5 | case2 | 40 | 44 | 765,473 | 0.698 | 108 |
-| Q6 | case1 | 96 | 106 | 4,790,899 | 6.669 | 344 |
-| Q6 | case2 | 84 | 92 | 4,200,618 | 5.561 | 318 |
-| Q7 | case1 | 224 | 254 | 27,793,523 | 50.056 | 906 |
-| Q7 | case2 | 196 | 240 | 26,463,332 | 49.953 | 808 |
-| Q8 | case1 | 512 | 686 | 88,551,994 | 207.723 | 2318 |
-| Q8 | case2 | 438 | 562 | 72,584,496 | 153.829 | 2102 |
-| Q9 | case1 | 1152 | 1558 | 909,749,194 | 14,307.567 | 5774 |
-| Q9 | case2 | 1059 | 1563 | 914,621,697 | 10,559.491 | 5199 |
-| Q10 | case1 | 2560 | 3308 | 8,663,587,275 | 2,660.163 | 13,998 |
+```powershell
+.\output\qk_special_cases_cuda.exe 12 12 1024 1000000 0 2000000 30 `
+  output\q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_YYYYMMDD_HHMMSS `
+  .\custom_qk_cases.csv 0 q12_case1 `
+  layer_only 24 1024 1000000 16 `
+  0 1 200000 0.25 24 0 1 `
+  262144 65536 4096 1536 2 0.15 cuda diverse cub
+```
 
-Q9 case1：
+實際保存資料夾中曾有 watchdog 讓 process 在 `q12_case1` 完成後停止，因此 `q12_case2` 只留下前 17 層 partial depth/timing rows，不列入正式完成結果。
 
-- Beam width：`256`
-- 解深度：`1558`
-- Visited states：`909,749,195`
-- 執行時間：約 `3 小時 58 分 28 秒`
-- Peak RAM：約 `1.56 GB`
-- 搜尋完成時 SQLite visited：約 `19.75 GB`
-- Beam 比 Batcher 少約 `73.0%` swaps
-- `beam_path_valid=1`
+## 目前正式結果摘要
 
-搜尋完成後 SQLite visited shards 已刪除以釋放空間；最終 path、每層進度與結果 CSV 仍保留。
+### Q4-Q11 CUDA all-run
 
-Q9 case2：
+來源：
 
-- Beam width：`256`
-- 解深度：`1563`
-- Visited states：`914,621,698`
-- 執行時間：約 `2 小時 56 分 0 秒`
-- 搜尋完成時 SQLite visited：約 `21.32 GB`（約 `19.86 GiB`）
-- Beam 比 Batcher 少約 `69.9%` swaps
-- `beam_path_valid=1`
+```text
+output/q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055/
+```
 
-Q10 case1：
+設定：
 
-- Beam mode：`layer_only`
-- Beam width：`512`
-- Layer pool width：`4096`
-- Layer visited window：`4096`
-- Perturbation ratio：`0.10`
-- 解深度：`3308`
-- Visited states：`8,663,587,276`
-- 執行時間：約 `44 分 20 秒`
-- Peak RAM：本輪監控約低於 `1 GB`
-- Beam 比 Batcher 少約 `76.4%` swaps
-- `beam_path_valid=1`
+- `beam_width=512`
+- `beam_visited_mode=layer_only`
+- `layer_pool_width=65536`
+- `layer_visited_window=65536`
+- `layer_restart_max_width=2048`
+- `layer_plateau_limit=2048`
+- `layer_perturbation_ratio=0.10`
+- `candidate_backend=cuda`
+- `beam_selection_policy=diverse`
+- `cuda_topk_mode=cub`
 
-Q10 case2 在同一輪開始後曾產生 partial depth progress，但已依需求停止；目前不列為正式完成結果。
+| Dimension | Cases solved | Beam step range | Total expanded | Total Beam sec | Valid paths |
+|---|---:|---:|---:|---:|---:|
+| Q4 | 24/24 | 6-21 | 4,616,321 | 4.061 | 24/24 |
+| Q5 | 2/2 | 40-44 | 3,205,037 | 2.607 | 2/2 |
+| Q6 | 2/2 | 94-110 | 19,547,494 | 14.315 | 2/2 |
+| Q7 | 2/2 | 244-268 | 116,436,146 | 38.269 | 2/2 |
+| Q8 | 2/2 | 556-634 | 621,749,910 | 98.801 | 2/2 |
+| Q9 | 2/2 | 1351-1464 | 3,315,878,036 | 265.926 | 2/2 |
+| Q10 | 2/2 | 3019-3350 | 16,685,211,272 | 605.560 | 2/2 |
+| Q11 | 2/2 | 6845-8048 | 85,866,033,678 | 1431.354 | 2/2 |
 
-### 成果檔
+### Q8-Q12 important cases
 
-- Q4-Q7：`output/qk_custom_cases_20260605_133247/`
-- Q8 case1：`output/q8_case1_trim_20260605_154219/`
-- Q8 case2：`output/q8_case2_trim_20260605_154927/`
-- Q9 case1：`output/q9_case1_disk_bw256_20260607_113040/`
-- Q9 case2：`output/q9_case2_disk_bw256_path_20260609_170556/`
-- Q10 case1：`output/q10_ram_layer_bw512_pool4096_win4096_restart512_plateau512_perturb010_path_20260612_184936/`
-- 完整路徑 Excel：`output/qk_special_cases_routes.xlsx`
-- 自訂 cases：`custom_qk_cases.csv`
+| Case | Strong LB | Beam steps | Expanded | Beam sec | Batcher swaps | Path valid |
+|---|---:|---:|---:|---:|---:|---:|
+| q8_case1 | 512 | 634 | 331,291,728 | 52.381 | 2,318 | yes |
+| q8_case2 | 438 | 556 | 290,458,182 | 46.419 | 2,102 | yes |
+| q9_case1 | 1152 | 1464 | 1,724,512,530 | 137.966 | 5,774 | yes |
+| q9_case2 | 1059 | 1351 | 1,591,365,506 | 127.960 | 5,199 | yes |
+| q10_case1 | 2560 | 3350 | 8,776,263,750 | 314.983 | 13,998 | yes |
+| q10_case2 | 2305 | 3019 | 7,908,947,522 | 290.577 | 13,113 | yes |
+| q11_case1 | 5632 | 8048 | 46,401,393,019 | 760.112 | 33,484 | yes |
+| q11_case2 | 5023 | 6845 | 39,464,640,659 | 671.242 | 31,209 | yes |
+| q12_case1 | 12288 | 28814 | 725,041,947,494 | 7892.204 | 79,014 | yes |
 
-## 依賴
+Q12 case1 來源：
 
-- C++17 編譯器（建議 g++）
-- OpenMP
-- Threads
-- SQLite3
-- Python 3.11+
-- pandas, matplotlib（用於繪圖腳本）
+```text
+output/q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_20260613_132118/
+```
 
-## 備註
+## 輸出檔案
 
-- `output/` 保留正式 Q4 benchmark、Q4-Q10 special-case 結果與完整路徑 Excel。
-- `legacy/` 保存舊版與過時資料，包含 Q3 輸出、舊 Q4 測試、失敗或中止的 path run、smoke tests、verification experiments、舊報告與 saved runs。
+每個 special-case run 通常產生：
+
+| 檔案 | 說明 |
+|---|---|
+| `qk_special_cases.csv` | 最終結果，包含 state、Beam path、Batcher path |
+| `qk_case_progress.csv` | 每完成一個 case 寫一列，適合監控 |
+| `qk_beam_depth_progress.csv` | 每層 Beam progress |
+| `qk_cuda_timing.csv` | CUDA backend timing breakdown |
+| `qk_beam_candidate_trace.csv` | 候選 trace，正式大型 run 通常維持 0 bytes |
+| `qk_beam_disk_progress.csv` | disk visited mode 才會有內容 |
+
+完整路徑 Excel：
+
+```text
+output/qk_special_cases_routes.xlsx
+```
+
+目前 Excel 包含 Q4-Q12 sheets，其中 Q12 只有 `q12_case1`。Q12 sheet 由 [tools/add_q12_routes_sheet_fast.py](tools/add_q12_routes_sheet_fast.py) 直接寫 OpenXML，避免一般 Excel library 重新載入整本 workbook 時卡住。
+
+一般 workbook 更新工具：
+
+```text
+tools/update_qk_routes_workbook.py
+```
+
+## 目前保留的主要資料夾
+
+正式或仍有參考價值的資料夾：
+
+- `output/q4_q11_cuda_all_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_cub_20260613_113055/`
+- `output/q12_cuda_gpu_retained_bw1024_pool262144_win65536_restart4096_plateau1536_perturb015_cub_path_20260613_132118/`
+- `output/q11_cuda_cub_bw512_pool65536_win65536_restart2048_plateau2048_perturb010_path_20260612_231014/`
+- `output/q9_cuda_diverse_bw256_pool4096_win4096_perturb010_20260613_090936/`
+- `output/q8_case1_trim_20260605_154219/`
+- `output/q8_case2_trim_20260605_154927/`
+- `output/q9_case1_disk_bw256_20260607_113040/`
+- `output/q9_case2_disk_bw256_path_20260609_170556/`
+- `output/cuda_opt_verify_q10_bw512_case1/`
+- `output/cuda_fix_verify_q10_case2/`
+- `output/q10_cuda_bw512_pool32768_win32768_restart1024_plateau1536_perturb010_case2_20260612_222245/`
+- `output/qk_custom_cases_20260605_133247/`
+- `output/q4_path_selected_10000_basic_no_path_20260604_205233/`
+
+`output/q4_path_selected_10000_basic_no_path_20260604_205233/` 是 Q4 random benchmark 的歷史 artifact。新的 Q4 random work 請到 `codex/q4-random-test` 分支。
+
+## 清理政策
+
+小規模測試後預設清理：
+
+- 空資料夾
+- aborted run
+- preview workbook render
+- `verify_*` smoke output
+- stale `qk_beam_path_*.bin`
+- 已被新正式結果取代的小測試資料
+
+不要自動刪除：
+
+- `QK_RESULTS_INDEX.md` 列出的正式結果
+- `output/qk_special_cases_routes.xlsx`
+- 使用者明確指定要保留的 partial progress
+- Git 已追蹤且 README 正在引用的 artifact
+
+## 目前限制與下一步
+
+- Q12 case2 尚未正式完成。
+- Q13-Q15 cases 已加入，但還沒有正式 solved artifact。
+- CUDA 已把候選產生與 Top-K preselection 移到 GPU，但 final exact retained selection 和 materialization 仍有 CPU 成分。
+- Beam 仍是 heuristic search。加寬 `beam_width` 可以增加機會，但高維 tail plateau 顯示主體搜尋策略仍需要改進，不能只靠加寬度。
+- Q12 以上應優先研究更能避免 local best 的通用策略，而不是針對單一 permutation 寫特化解法。
