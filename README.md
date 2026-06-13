@@ -28,7 +28,7 @@
 | Q5-Q14 | 2 each |
 | Q15 | 1 |
 
-結果目錄的保留規則與目前官方資料來源整理在 [QK_RESULTS_INDEX.md](QK_RESULTS_INDEX.md)。
+結果目錄的保留與清理規則以本 README 的「目前保留的主要資料夾」與「清理政策」為準。
 
 ## 問題模型
 
@@ -352,7 +352,7 @@ tools/update_qk_routes_workbook.py
 
 不要自動刪除：
 
-- `QK_RESULTS_INDEX.md` 列出的正式結果
+- 本 README 列出的正式結果資料夾
 - `output/qk_special_cases_routes.xlsx`
 - 使用者明確指定要保留的 partial progress
 - Git 已追蹤且 README 正在引用的 artifact

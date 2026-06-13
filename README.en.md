@@ -20,7 +20,7 @@ As of `2026-06-13`:
 | Q15 | one case is present but unsolved in official artifacts | `custom_qk_cases.csv` |
 | Route workbook | Q4-Q12 sheets exist; Q12 currently contains `q12_case1` only | `output/qk_special_cases_routes.xlsx` |
 
-`custom_qk_cases.csv` currently contains 24 Q4 cases, 2 cases for each Q5-Q14 dimension, and 1 Q15 case. The preserved artifact list and cleanup rules are tracked in [QK_RESULTS_INDEX.md](QK_RESULTS_INDEX.md).
+`custom_qk_cases.csv` currently contains 24 Q4 cases, 2 cases for each Q5-Q14 dimension, and 1 Q15 case. Preserved artifacts and cleanup rules are documented in this README.
 
 ## Problem Model
 
@@ -287,7 +287,7 @@ Delete after small tests unless explicitly promoted:
 
 Do not delete automatically:
 
-- artifacts listed in `QK_RESULTS_INDEX.md`
+- official result directories listed in this README
 - `output/qk_special_cases_routes.xlsx`
 - user-requested partial progress
 - tracked artifacts referenced by README
